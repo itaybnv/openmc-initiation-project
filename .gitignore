@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.ipynb_checkpoints/
+# OpenMC outputs
+*.h5
+summary.h5
+statepoint.*.h5
+tallies.out
+plots.xml
+
+# Data files (too large for git)
+*.xml
+nndc_hdf5/
+
+# Editor
+.vscode/
+*.swp
