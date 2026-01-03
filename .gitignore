@@ -19,6 +19,9 @@ plots.xml
 nndc_hdf5/
 data/raw/
 
+# Result files
+results/
+
 # Editor
 .vscode/
 *.swp
