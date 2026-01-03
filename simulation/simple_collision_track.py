@@ -65,10 +65,10 @@ settings.source = openmc.IndependentSource(
 )
 
 settings.batches = (batches := 100)
-settings.particles = (particles := 10000)
+settings.particles = (particles := 1000)
 
 settings.collision_track = {
-    "max_collisions": 100000000,
+    "max_collisions": 50 * batches * particles,
     "reactions": ["absorption"],
     # "material_ids": [1,2],
     # "nuclides": ["U238", "O16"],
