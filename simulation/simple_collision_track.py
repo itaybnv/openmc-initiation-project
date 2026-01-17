@@ -8,7 +8,7 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # Material definitions
 # -----------------------------------------------------------------------------
-u235_fraction = 0.00115
+u235_fraction = 0.00113
 
 fuel_water = openmc.Material(name="U235-H2O mixture")
 h_fraction = 2.0 * (1 - u235_fraction) / 3.0
@@ -65,7 +65,7 @@ settings.source = openmc.IndependentSource(
 )
 
 settings.batches = (batches := 100)
-settings.particles = (particles := 1000)
+settings.particles = (particles := 10000)
 
 settings.collision_track = {
     "max_collisions": 50 * batches * particles,
@@ -75,7 +75,8 @@ settings.collision_track = {
     "cell_ids": [detector1_cell.id, detector2_cell.id],
 }
 
-settings.output = {"path": "../data/raw"}
+settings.create_delayed_neutrons = False
+settings.output = {"path": "../data/simple_collision_track"}
 
 
 # -----------------------------------------------------------------------------

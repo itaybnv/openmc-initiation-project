@@ -45,6 +45,7 @@ settings = openmc.Settings()
 settings.run_mode = "eigenvalue"
 
 settings.batches = (batches := 100)
+settings.inactive = (inactive := 30)
 settings.particles = (particles := 100000)
 
 settings.output = {"path": "../data/k_system"}
