@@ -22,7 +22,7 @@ fuel_water.add_s_alpha_beta("c_H_in_H2O")
 
 absorber = openmc.Material(name="Absorber")
 absorber.add_nuclide("B10", 1.0, "ao")
-absorber.set_density("atom/b-cm", 100)
+absorber.set_density("g/cm3", 2.34 * 10)
 
 materials = openmc.Materials([fuel_water, absorber])
 
@@ -37,15 +37,30 @@ detector_distance = radius + 10.0
 
 fuel_sphere = openmc.Sphere(r=radius)
 outer_sphere = openmc.Sphere(r=outer_radius, boundary_type="vacuum")
-detector1_sphere = openmc.Sphere(y0=detector_distance, r=detector_radius)
+detector_sphere = openmc.Sphere(y0=detector_distance, r=detector_radius)
 
 fuel_cell = openmc.Cell(name="fuel", fill=fuel_water, region=-fuel_sphere)
-detector1_cell = openmc.Cell(name="detector1", fill=absorber, region=-detector1_sphere)
+detector_cell = openmc.Cell(name="detector", fill=absorber, region=-detector_sphere)
 
-void_region = +fuel_sphere & +detector1_sphere & -outer_sphere
+void_region = +fuel_sphere & +detector_sphere & -outer_sphere
 void_cell = openmc.Cell(name="void", region=void_region)
 
-geometry = openmc.Geometry([fuel_cell, detector1_cell, void_cell])
+geometry = openmc.Geometry([fuel_cell, detector_cell, void_cell])
+
+
+# -----------------------------------------------------------------------------
+# Plot geometry (optional)
+# -----------------------------------------------------------------------------
+# Create a voxel plot covering your geometry
+plot = openmc.Plot()
+plot.type = "voxel"
+plot.origin = (0, 0, 0)
+plot.width = (outer_radius, outer_radius, outer_radius)  # adjust to your geometry size
+plot.pixels = (200, 200, 200)  # resolution
+plot.color_by = "cell"
+
+plots = openmc.Plots([plot])
+
 
 # -----------------------------------------------------------------------------
 # Simulation settings: fixed source and source definition
@@ -62,25 +77,24 @@ settings.source = openmc.IndependentSource(
     time=stats.Discrete([0.0], [1.0]),  # Emission at time zero - single pulse
 )
 
-settings.batches = (batches := 1)
-settings.particles = (particles := 1_000_000)
+settings.batches = (batches := 10)
+settings.particles = (particles := 1000)
 
-settings.collision_track = {
-    "max_collisions": 100 * batches * particles,
-    "reactions": [101],  # Total capture reaction
-    # "material_ids": [1,2],
-    "cell_ids": [detector1_cell.id],
-}
+settings.max_tracks = batches * particles
+settings.max_tracks = 20
 
-# settings.create_delayed_neutrons = False
-settings.output = {"path": "../data/simple_collision_track"}
+settings.output = {"path": "../data/track_feature"}
 
 
 # -----------------------------------------------------------------------------
 # Build model and run
 # -----------------------------------------------------------------------------
-model = openmc.Model(geometry=geometry, materials=materials, settings=settings)
+model = openmc.Model(
+    geometry=geometry, materials=materials, settings=settings, plots=plots
+)
 
 model.export_to_model_xml(path="./simulation")
 
-openmc.run(cwd="./simulation")
+# openmc.plot_geometry(path_input="./simulation/model.xml")
+# openmc.voxel_to_vtk("plot_1.h5")
+openmc.run(cwd="./simulation", tracks=True)
