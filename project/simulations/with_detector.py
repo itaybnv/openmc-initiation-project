@@ -1,5 +1,3 @@
-
-
 import openmc
 
 from project.core.geometry import core_with_detector
@@ -16,6 +14,17 @@ geometry = core_with_detector(
     detector_radius=5.0,
 )
 settings = detector_settings
+cell_filter = openmc.CellFilter(
+    geometry.get_all_cells()[1]
+)  # Assuming the first cell is the detector cell
+fission_tally = openmc.Tally()
+fission_tally.filters = [cell_filter]
+fission_tally.scores = ["fission"]
+nu_fission_tally = openmc.Tally()
+nu_fission_tally.filters = [cell_filter]
+nu_fission_tally.scores = ["nu-fission"]
+tallies = openmc.Tallies([fission_tally, nu_fission_tally])
+
 simulation = Simulation(
     materials=materials,
     geometry=geometry,
@@ -24,4 +33,5 @@ simulation = Simulation(
 )
 
 simulation.build()
+simulation.model.tallies = tallies
 simulation.run()
