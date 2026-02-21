@@ -1,9 +1,8 @@
 """ "Simulation class to manage OpenMC simulations."""
 
 from pathlib import Path
-from unicodedata import name
 import openmc
-from typing import Dict, Any
+from typing import Any
 
 
 class Simulation:
@@ -11,7 +10,7 @@ class Simulation:
         self,
         materials: openmc.Materials,
         geometry: openmc.Geometry,
-        settings: Dict[str, Any],
+        settings: dict[str, Any],
         name: str = "sim",
     ):
         """Initialize the Simulation object.
@@ -32,7 +31,7 @@ class Simulation:
         self.name = name
         self.output_dir = Path(__file__).parent.parent / "results" / name
 
-    def build(self):
+    def build(self) -> openmc.Model:
         """Build the OpenMC model.
         Returns
         -------
@@ -46,7 +45,7 @@ class Simulation:
         )
         return self.model
 
-    def run(self):
+    def run(self) -> Path:
         """Run the simulation.
         Returns
         -------

@@ -4,7 +4,7 @@ project/analysis/outputs/figures/
 project/analysis/outputs/data/
 project/data/
 
-deprecated_simulations/
+deprecated_*/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -18,3 +18,5 @@ __pycache__/
 
 # macOS/Linux
 .DS_Store
+
+CLAUDE.md
