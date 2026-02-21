@@ -3,7 +3,7 @@
 import openmc
 from .materials import mixture_material, detector_material
 
-__all__ = ["core_sphere", "core_with_detector"]
+__all__ = ["core_sphere", "core_with_detector", "core_with_perfect_detector"]
 
 
 DEFAULTS = {
@@ -11,6 +11,8 @@ DEFAULTS = {
     "core_radius": 3.0,
     "detector_center": (0.0, 3.0 + 5.0 + 10.0, 0.0),
     "detector_radius": 5.0,
+    "perfect_detector_outer_radius": 3.0 + 3.0,
+    "perfect_detector_inner_radius": 3.0,
 }
 
 
@@ -99,3 +101,35 @@ def core_with_detector(
     void_cell = openmc.Cell(region=+core_surface & +detector_surface & -outer_surface)
 
     return openmc.Geometry([core_cell, void_cell, detector_cell])
+
+
+def core_with_perfect_detector(
+    core_radius: float = DEFAULTS["core_radius"],
+    detector_inner_radius: float = DEFAULTS["perfect_detector_inner_radius"],
+    detector_outer_radius: float = DEFAULTS["perfect_detector_outer_radius"],
+) -> openmc.Geometry:
+    """Create a geometry with a spherical core and a perfect spherical detector.
+    Parameters
+    ----------
+    core_radius : float
+        The radius of the core sphere.
+    detector_outer_radius : float
+        The outer radius of the perfect detector sphere.
+    Returns
+    -------
+    openmc.Geometry
+        The geometry object representing the core and perfect detector.
+    """
+    core_surface = openmc.Sphere(r=core_radius)
+    detector_inner_surface = openmc.Sphere(r=detector_inner_radius)
+    detector_outer_surface = openmc.Sphere(
+        r=detector_outer_radius, boundary_type="vacuum"
+    )
+
+    core_cell = openmc.Cell(region=-core_surface, fill=mixture_material)
+    detector_cell = openmc.Cell(
+        region=-detector_outer_surface & +detector_inner_surface, fill=detector_material
+    )
+    void_cell = openmc.Cell(region=+core_surface & -detector_inner_surface)
+
+    return openmc.Geometry([core_cell, detector_cell, void_cell])
