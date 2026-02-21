@@ -1,28 +1,22 @@
+# Don't track simulation outputs
+project/results/
+project/analysis/outputs/figures/
+project/analysis/outputs/data/
+project/data/
+
+deprecated_*/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-.ipynb_checkpoints/
-# OpenMC outputs
-*.h5
-summary.h5
-statepoint.*.h5
-tallies.out
-plots.xml
+*.pyc
+.venv/
+*.egg*
 
-# Data files (too large for git)
-*.xml
-nndc_hdf5/
-data/
-*.vti
+# macOS/Linux
+.DS_Store
 
-# Result files
-results/
-
-# Editor
-.vscode/
-*.swp
+CLAUDE.md
