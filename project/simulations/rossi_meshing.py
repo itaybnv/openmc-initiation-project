@@ -6,6 +6,7 @@ from project.core.materials import detector_material, mixture_material
 from project.core.physics_config import detector_settings
 from project.core.rossi_mesh import make_fission_mesh
 from project.core.simulation import Simulation
+from project.core.source_utils import map_source_to_mesh, pregenerate_source
 
 materials = openmc.Materials([mixture_material, detector_material])
 geometry = core_with_detector(
@@ -48,4 +49,18 @@ simulation = Simulation(
 
 simulation.build()
 simulation.model.tallies = tallies
+
+# Pre-generate source file and map particles to mesh cells
+n_particles = settings["particles"]
+source_path = pregenerate_source(
+    model=simulation.model,
+    n_particles=n_particles,
+    output_dir=simulation.output_dir,
+)
+print(f"Pre-generated {n_particles:,} source particles → {source_path.name}")
+
+mesh_ids = map_source_to_mesh(source_path, mesh)
+np.save(simulation.output_dir / "source_mesh_ids.npy", mesh_ids)
+print(f"Mesh cell mapping saved. {np.sum(mesh_ids >= 0):,} particles inside mesh.")
+
 simulation.run()
