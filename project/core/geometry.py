@@ -2,17 +2,20 @@
 
 import openmc
 from .materials import mixture_material, detector_material
+from .rossi_mesh import CORE_RADIUS
 
 __all__ = ["core_sphere", "core_with_detector", "core_with_perfect_detector"]
 
+_DET_RADIUS = 5.0
+_DET_GAP = 10.0  # gap between core surface and detector inner surface
 
 DEFAULTS = {
     "core_center": (0.0, 0.0, 0.0),
-    "core_radius": 3.0,
-    "detector_center": (0.0, 3.0 + 5.0 + 10.0, 0.0),
-    "detector_radius": 5.0,
-    "perfect_detector_outer_radius": 3.0 + 3.0,
-    "perfect_detector_inner_radius": 3.0,
+    "core_radius": CORE_RADIUS,
+    "detector_center": (0.0, CORE_RADIUS + _DET_GAP + _DET_RADIUS, 0.0),
+    "detector_radius": _DET_RADIUS,
+    "perfect_detector_outer_radius": CORE_RADIUS + 3.0,
+    "perfect_detector_inner_radius": CORE_RADIUS,
 }
 
 

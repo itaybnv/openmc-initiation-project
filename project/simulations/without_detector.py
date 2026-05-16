@@ -3,6 +3,7 @@ import openmc
 from project.core.geometry import core_sphere
 from project.core.materials import mixture_material
 from project.core.physics_config import detector_settings
+from project.core.rossi_mesh import CORE_RADIUS
 from project.core.simulation import Simulation
 
 
@@ -10,7 +11,7 @@ from project.core.simulation import Simulation
 settings = {k: v for k, v in detector_settings.items() if k != "collision_track"}
 
 materials = openmc.Materials([mixture_material])
-geometry = core_sphere(center=(0.0, 0.0, 0.0), radius=3.0)
+geometry = core_sphere(center=(0.0, 0.0, 0.0), radius=CORE_RADIUS)
 
 cell_filter = openmc.CellFilter(geometry.get_all_cells()[1])  # core cell id=1
 fission_tally = openmc.Tally(name="fission")

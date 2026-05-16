@@ -3,11 +3,14 @@ import openmc
 from project.core.geometry import core_with_perfect_detector
 from project.core.materials import mixture_material, detector_material
 from project.core.physics_config import perfect_detector_settings
+from project.core.rossi_mesh import CORE_RADIUS
 from project.core.simulation import Simulation
-    
+
 materials = openmc.Materials([mixture_material, detector_material])
 geometry = core_with_perfect_detector(
-    detector_inner_radius=50.0, detector_outer_radius=60.0
+    core_radius=CORE_RADIUS,
+    detector_inner_radius=CORE_RADIUS,
+    detector_outer_radius=CORE_RADIUS + 3.0,
 )
 settings = perfect_detector_settings
 

@@ -5,7 +5,7 @@ import openmc
 N_RADIAL: int = 100
 N_THETA: int = 50
 N_PHI: int = 1
-CORE_RADIUS: float = 3.0  # cm
+CORE_RADIUS: float = 28.7  # cm — calibrated for k_eff ≈ 0.98 with physical density (1 g/cm³)
 
 
 def make_fission_mesh(

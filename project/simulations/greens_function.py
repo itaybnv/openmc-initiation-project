@@ -4,22 +4,22 @@ import openmc
 from project.core.geometry import core_with_detector
 from project.core.materials import detector_material, mixture_material
 from project.core.physics_config import detector_settings
-from project.core.rossi_mesh import make_fission_mesh
+from project.core.rossi_mesh import CORE_RADIUS, make_fission_mesh
 from project.core.simulation import Simulation
 from project.core.source_utils import map_source_to_mesh, pregenerate_source
 
 materials = openmc.Materials([mixture_material, detector_material])
 geometry = core_with_detector(
     core_center=(0.0, 0.0, 0.0),
-    core_radius=3.0,
-    detector_center=(0.0, 0.0, 3.0 + 5.0 + 10.0),
+    core_radius=CORE_RADIUS,
+    detector_center=(0.0, 0.0, CORE_RADIUS + 10.0 + 5.0),  # along +z, aligned with mesh polar axis
     detector_radius=5.0,
 )
 settings = detector_settings
 
 settings["source"] = openmc.IndependentSource(
     space=openmc.stats.SphericalIndependent(
-        r=openmc.stats.PowerLaw(0, 3.0, 2),  # p(r) ∝ r² → uniform volume
+        r=openmc.stats.PowerLaw(0, CORE_RADIUS, 2),  # p(r) ∝ r² → uniform volume
         cos_theta=openmc.stats.Uniform(-1, 1),
         phi=openmc.stats.Uniform(0, 2 * np.pi),
         origin=(0.0, 0.0, 0.0),

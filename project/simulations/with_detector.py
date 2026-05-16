@@ -3,14 +3,15 @@ import openmc
 from project.core.geometry import core_with_detector
 from project.core.materials import mixture_material, detector_material
 from project.core.physics_config import detector_settings
+from project.core.rossi_mesh import CORE_RADIUS
 from project.core.simulation import Simulation
 
 
 materials = openmc.Materials([mixture_material, detector_material])
 geometry = core_with_detector(
     core_center=(0.0, 0.0, 0.0),
-    core_radius=3.0,
-    detector_center=(0.0, 3.0 + 5.0 + 10.0, 0.0),
+    core_radius=CORE_RADIUS,
+    detector_center=(0.0, CORE_RADIUS + 10.0 + 5.0, 0.0),
     detector_radius=5.0,
 )
 settings = detector_settings
@@ -29,7 +30,7 @@ nu_fission_tally.scores = ["nu-fission"]
 core_surface = next(
     s for s in geometry.get_all_surfaces().values()
     if isinstance(s, openmc.Sphere)
-    and abs(s.r - 3.0) < 1e-9
+    and abs(s.r - CORE_RADIUS) < 1e-9
     and abs(s.x0) < 1e-9
     and abs(s.y0) < 1e-9
     and abs(s.z0) < 1e-9
