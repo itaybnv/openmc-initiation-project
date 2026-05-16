@@ -14,16 +14,35 @@ geometry = core_with_detector(
     detector_radius=5.0,
 )
 settings = detector_settings
-cell_filter = openmc.CellFilter(
-    geometry.get_all_cells()[1]
-)  # Assuming the first cell is the detector cell
-fission_tally = openmc.Tally()
+
+# Core cell (id=1) filter for fission tallies
+cell_filter = openmc.CellFilter(geometry.get_all_cells()[1])
+fission_tally = openmc.Tally(name="fission")
 fission_tally.filters = [cell_filter]
 fission_tally.scores = ["fission"]
-nu_fission_tally = openmc.Tally()
+nu_fission_tally = openmc.Tally(name="nu-fission")
 nu_fission_tally.filters = [cell_filter]
 nu_fission_tally.scores = ["nu-fission"]
-tallies = openmc.Tallies([fission_tally, nu_fission_tally])
+
+# Surface current tally on core sphere: separates inward J- and outward J+
+# to quantify how many neutrons are reflected back into the core by the detector
+core_surface = next(
+    s for s in geometry.get_all_surfaces().values()
+    if isinstance(s, openmc.Sphere)
+    and abs(s.r - 3.0) < 1e-9
+    and abs(s.x0) < 1e-9
+    and abs(s.y0) < 1e-9
+    and abs(s.z0) < 1e-9
+    and s.boundary_type == "transmission"
+)
+surface_current_tally = openmc.Tally(name="core_surface_current")
+surface_current_tally.filters = [
+    openmc.SurfaceFilter([core_surface]),
+    openmc.MuSurfaceFilter([-1.0, 0.0, 1.0]),  # [-1,0] = inward J-, [0,1] = outward J+
+]
+surface_current_tally.scores = ["current"]
+
+tallies = openmc.Tallies([fission_tally, nu_fission_tally, surface_current_tally])
 
 simulation = Simulation(
     materials=materials,
