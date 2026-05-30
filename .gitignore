@@ -1,8 +1,10 @@
-# Don't track simulation outputs
+# Don't track simulation outputs (regenerable; results from greens_sweep.py, figures from notebooks)
 project/results/
-project/analysis/outputs/figures/
-project/analysis/outputs/data/
+project/analysis/outputs/
 project/data/
+
+# Reference papers (not committed)
+*.pdf
 
 deprecated_*/
 
