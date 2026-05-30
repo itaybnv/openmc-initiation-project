@@ -1,3 +1,11 @@
+"""Global uniform-source run (k=0.98). Kept as the source of the per-cell FISSION TALLY F_i.
+
+NOTE: the `collision_track` + `mesh_ids[parent_id-1]` spatial attribution this run was originally
+analysed with is INVALID (openmc.FileSource samples random sites, so id != source-file row). The
+corrected spatial Green's function comes from `project.simulations.greens_sweep` (confined source
+per cell). Only the fission tally from this run is still consumed (by `project.analysis.greens_loader`).
+The k040/k070/k090 variants mirror this file.
+"""
 import numpy as np
 import openmc
 
