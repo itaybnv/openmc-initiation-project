@@ -12,7 +12,9 @@ _DET_GAP = 10.0  # gap between core surface and detector inner surface
 DEFAULTS = {
     "core_center": (0.0, 0.0, 0.0),
     "core_radius": CORE_RADIUS,
-    "detector_center": (0.0, CORE_RADIUS + _DET_GAP + _DET_RADIUS, 0.0),
+    # On +Z so it is aligned with the SphericalMesh polar axis (theta from +Z);
+    # this is required for the per-cell Green's function attribution to be meaningful.
+    "detector_center": (0.0, 0.0, CORE_RADIUS + _DET_GAP + _DET_RADIUS),
     "detector_radius": _DET_RADIUS,
     "perfect_detector_outer_radius": CORE_RADIUS + 3.0,
     "perfect_detector_inner_radius": CORE_RADIUS,

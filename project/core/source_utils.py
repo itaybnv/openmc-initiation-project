@@ -73,6 +73,15 @@ def map_source_to_mesh(
     particle's position. The flat index follows OpenMC's convention:
     r varies fastest, phi varies slowest.
 
+    .. warning::
+        Do NOT use the returned array to attribute detector captures back to a birth
+        cell via ``mesh_ids[parent_id - 1]``. ``openmc.FileSource`` samples a *random*
+        site per history, so the simulated particle ``id`` does not equal the source-file
+        row index -- the attribution is scrambled and flattens the spatial Green's
+        function to a constant. Use ``project.simulations.greens_sweep`` (one confined
+        source per cell) for correct per-cell attribution. This function remains valid
+        only for verifying source uniformity (counts per cell), not detector attribution.
+
     Parameters
     ----------
     source_path : Path or str
