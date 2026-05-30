@@ -1,11 +1,23 @@
 """Shared spherical mesh configuration for the Rossi-alpha meshing simulation."""
+
 import numpy as np
 import openmc
 
-N_RADIAL: int = 100
-N_THETA: int = 50
+N_RADIAL: int = 40
+N_THETA: int = 20
 N_PHI: int = 1
-CORE_RADIUS: float = 28.7  # cm — calibrated for k_eff ≈ 0.98 with physical density (1 g/cm³)
+CORE_RADIUS: float = (
+    28.7  # cm — calibrated for k_eff ≈ 0.98 with physical density (1 g/cm³)
+)
+
+# Calibrated radii for the k_eff comparison study (50k particles, 60 batches, 20 inactive).
+# Each k_eff value is within ±0.005 of the target.
+KEFF_CONFIGS: dict[float, dict] = {
+    0.98: {"radius": 28.700, "label": "k098"},
+    0.90: {"radius": 24.500, "label": "k090"},
+    0.70: {"radius": 17.700, "label": "k070"},
+    0.40: {"radius": 11.400, "label": "k040"},
+}
 
 
 def make_fission_mesh(
