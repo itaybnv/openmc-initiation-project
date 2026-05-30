@@ -1,3 +1,14 @@
+"""DEPRECATED precursor to greens_function.py -- DO NOT USE.
+
+Two known defects, both fixed in the current pipeline:
+  1. Detector on +Y (`(0, R+15, 0)`) while the SphericalMesh polar axis is +Z, so the mesh
+     averages over the detector direction.
+  2. Spatial attribution via `mesh_ids[parent_id-1]` is invalid: `openmc.FileSource` samples a
+     random site per history (particle id != source-file row), flattening G_i to a constant.
+
+Use `project.simulations.greens_sweep` (confined-source per cell) + `project.analysis.greens_loader`
+for the corrected spatial Green's function. Kept only for historical reference.
+"""
 import numpy as np
 import openmc
 
