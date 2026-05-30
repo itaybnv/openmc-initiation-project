@@ -196,7 +196,9 @@ def directional_vs_time(sweep: dict, r_frac_min: float = 0.5, windows=None):
     gf = g_t[facing].sum(axis=0)                       # (N_T,)
     ga = g_t[away].sum(axis=0)
     if windows is None:
-        windows = [(0, 2e-5), (2e-5, 1e-4), (1e-4, 5e-4), (5e-4, 2e-3), (2e-3, 1e-2)]
+        # fine log-spaced windows so the monotonic decay to 1 is resolved (not just 5 points)
+        windows = [(0, 2e-5), (2e-5, 4e-5), (4e-5, 8e-5), (8e-5, 1.6e-4), (1.6e-4, 3.2e-4),
+                   (3.2e-4, 6.4e-4), (6.4e-4, 1.3e-3), (1.3e-3, 2.6e-3), (2.6e-3, 5e-3), (5e-3, 1e-2)]
     rows = []
     for lo, hi in windows:
         m = (tc >= lo) & (tc < hi)

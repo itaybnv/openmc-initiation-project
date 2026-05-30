@@ -418,31 +418,60 @@ plt.show()
     cells.append(md(r"""
 ## 3b. Direct vs multiplied: directional contrast vs arrival time
 
-Why is the *integrated* near/far contrast "only" ~7× at k=0.98 when the directional physics looks so
-strong? Because the time-integrated $G_i$ mixes two channels with opposite behaviour. Splitting the
-outer-shell detections by **arrival time** separates them:
+The time-integrated $G_i$ mixes two channels with opposite behaviour; splitting the outer-shell
+detections by **arrival time** separates them cleanly:
 
-* **Early (direct first-flight)** — the source neutron itself streams to the detector. Strongly
-  directional at every $k$ (facing/away reaches ~10²).
-* **Late (fission chain)** — descendants leak after the chain has relaxed toward the fundamental
-  mode, which is direction-independent, so the contrast collapses toward 1.
+* **Early — direct first-flight.** The source neutron streams to the detector before any fission.
+  This is **pure transport/geometry, independent of multiplication**: the facing/away contrast is set
+  by how much farther and more shielded the far pole is. So the early magnitude scales with **core
+  size** (far/near distance ratio ≈ 4.7, 4.2, 3.3, 2.5 for k = 0.98→0.40) — it is large at k=0.98
+  *because that core is bigger*, not because of more fission. (k is tuned via radius, so k and core
+  size are confounded here.)
+* **Late — fission chain.** Descendants leak only after the chain has relaxed to the **fundamental
+  spatial mode**, which for a bare sphere is **spherically symmetric (θ-independent)**. Once relaxed, a
+  facing-born and an away-born neutron leak identically, so the contrast decays **monotonically to
+  exactly 1, from above** — analytically $(1+\rho)/(1-\rho)$ with $\rho\propto e^{(\alpha_1-\alpha_0)t}$.
 
-Near critical the long-lived chain channel dominates the time integral, washing the *integrated*
-contrast down to ~7×; far below critical the direct channel weighs more, so integrated contrast
-grows. (Time resolution is 19.5 µs/bin from the linear `g_t`; the trend is sharpest at k=0.98.)
+**This is why there is no "flip" and no crossing:** *every* $k$ washes out to 1 (it is the mode's
+symmetry doing it, not the amount of multiplication), and the order is preserved throughout — high-$k$
+starts higher (bigger core) *and* relaxes more slowly (bigger core ⇒ closer-spaced modes), so it stays
+on top until all curves merge at 1. The genuinely $k$/$R$-dependent features are the *early magnitude*
+and *how long the contrast persists*. Near critical the long-lived chain channel dominates the time
+integral, pulling the *integrated* contrast toward 1; far below critical the direct channel weighs more.
+
+Each point is a ratio of large counts (sub-1% error) so error bars are omitted; under-sampled late
+windows are dropped rather than shown as noise.
 """))
     cells.append(code(r"""
-fig, ax = plt.subplots(figsize=(8.5, 5))
+# Each point is a ratio of two large Poisson counts (thousands), so its statistical error is <1%
+# -- invisible on a 2-decade log axis. So we omit error bars and instead simply DROP windows with
+# too few counts (which would otherwise show as noisy late-time points), keeping only reliable ones.
+MIN_CT = 50
+fig, ax = plt.subplots(figsize=(9, 5.5))
 for L in LABELS:
-    d = gl.directional_vs_time(sweeps[L])          # cols: t_centre, ratio, err, n_f, n_a
-    ax.errorbar(d[:, 0] * 1e6, d[:, 1], yerr=d[:, 2], marker="o", capsize=3,
-                color=COLORS[L], label=f"k={sweeps[L]['k']:.2f}")
-ax.axhline(1.0, ls=":", color="gray", label="no contrast (isotropic)")
+    d = gl.directional_vs_time(sweeps[L])           # cols: t_centre[s], ratio, err, n_facing, n_away
+    ok = (d[:, 3] >= MIN_CT) & (d[:, 4] >= MIN_CT)   # enough facing AND away detections
+    ax.plot(d[ok, 0] * 1e6, d[ok, 1], "o-", ms=7, lw=2, color=COLORS[L],
+            label=f"k={sweeps[L]['k']:.2f}")
+
 ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("neutron arrival time [µs]")
-ax.set_ylabel("facing / away   (outer shells, $r/R>0.5$)")
-ax.set_title("Directional contrast vs arrival time\n(early = direct first-flight, late = fission chain)")
-ax.legend()
+ax.set_xlim(5, 1.2e4); ax.set_ylim(0.8, 300)
+
+# y=1 reference = isotropic (carries no directional information)
+ax.axhline(1.0, ls="--", color="0.4", lw=1)
+ax.text(1.1e4, 1.05, "isotropic — no direction info", color="0.4", fontsize=9, ha="right", va="bottom")
+
+# annotate the two physical regimes directly on the plot
+ax.axvspan(5, 35, color="0.91", zorder=0)
+ax.text(13, 200, "DIRECT\nfirst-flight\n(geometric)", fontsize=9.5, ha="center", va="top", weight="bold")
+ax.annotate("FISSION CHAIN\n→ fundamental mode\n(direction washes out)", xy=(3e3, 1.15),
+            xytext=(1.5e3, 8), fontsize=9.5, ha="center", color="0.25",
+            arrowprops=dict(arrowstyle="->", color="0.5", lw=1.2))
+
+ax.set_xlabel("neutron arrival time  [µs]")
+ax.set_ylabel(r"facing / away detection ratio   (outer shells, $r/R>0.5$)")
+ax.set_title("Directional contrast decays from first-flight to fission chain")
+ax.legend(loc="lower left")
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "directional_vs_time.png", dpi=200, bbox_inches="tight")
 plt.show()
