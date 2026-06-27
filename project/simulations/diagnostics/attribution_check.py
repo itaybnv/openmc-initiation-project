@@ -12,9 +12,14 @@ the attribution is scrambled. This script demonstrates it with a direct, physica
     detections must, under correct attribution, map back to high-cos(theta) birth cells.
 
 Two paths are run on identical physics (small R=11.4 cm core for speed):
-  A) current method: pregenerate_source + FileSource, map the pre-generated file by id.
-  B) proposed fix:   IndependentSource directly + settings.write_initial_source=True,
-                     map the *realized* initial_source.h5 (written in id order) by id.
+  A) buggy method: pregenerate_source + FileSource, map the pre-generated file by id.
+  B) the fix:      eigenvalue mode (batches=1, inactive=0) + write_initial_source=True,
+                   map the *realized* initial_source.h5 (written in id order) by id.
+                   write_initial_source has NO effect in fixed-source mode, hence the
+                   eigenvalue recipe. Caveat: eigenvalue mode does not transport fission
+                   progeny within the generation, so path B sees the direct (first-
+                   generation) detections only -- see
+                   diagnostics.chain_completeness_check for the full A/B physics gate.
 
 Expected: path A -> mean birth cos(theta) ~ 0 for fast detections (scrambled);
           path B -> mean birth cos(theta) strongly positive (correct).
@@ -29,7 +34,7 @@ from pathlib import Path
 from project.core.geometry import core_with_detector
 from project.core.materials import detector_material, mixture_material
 from project.core.simulation import Simulation
-from project.core.source_utils import pregenerate_source
+from project.core.source_utils import pregenerate_source, read_initial_source
 
 R = 11.4                      # small core (k~0.40) -> fast, low multiplication, strong direct signal
 N = 500_000                   # source particles
@@ -52,8 +57,7 @@ def make_source() -> openmc.IndependentSource:
 
 
 def make_geometry() -> openmc.Geometry:
-    # reset so the detector cell is deterministically id=2 (matches collision_track cell_ids)
-    openmc.reset_auto_ids()
+    # cell ids are deterministic (detector=2): the factory assigns explicit ids
     return core_with_detector(
         core_center=(0.0, 0.0, 0.0),
         core_radius=R,
@@ -115,8 +119,13 @@ def run_path_a() -> None:
 
 
 def run_path_b() -> None:
-    """Proposed fix: IndependentSource direct + write_initial_source. Expected CORRECT."""
-    settings = base_settings() | {"source": make_source()}
+    """The fix: eigenvalue provenance recipe + write_initial_source. Expected CORRECT."""
+    settings = base_settings() | {
+        "run_mode": "eigenvalue",
+        "inactive": 0,
+        "write_initial_source": True,  # eigenvalue-only; ignore the meaningless k-eff
+        "source": make_source(),
+    }
     sim = Simulation(
         materials=openmc.Materials([mixture_material, detector_material]),
         geometry=make_geometry(),
@@ -124,14 +133,14 @@ def run_path_b() -> None:
         name="diag-attribution-B-writeinit",
     )
     sim.build()
-    sim.settings_obj.write_initial_source = True
     sim.run()
     realized = sim.output_dir / "initial_source.h5"
     if not realized.exists():
         print(f"\n  !! write_initial_source produced no file at {realized} -- fix B unavailable")
         return
-    birth = openmc.read_source_file(str(realized)).to_dataframe()[["x", "y", "z"]].to_numpy()
-    early_time_test(sim.output_dir, birth, "PATH B: IndependentSource + write_initial_source (fix)")
+    # h5py read: openmc.read_source_file raises KeyError on initial_source.h5
+    birth, _ = read_initial_source(realized)
+    early_time_test(sim.output_dir, birth, "PATH B: eigenvalue + write_initial_source (fix)")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,43 @@
-"""Utilities for pre-generating source files and mapping source particles to mesh cells."""
+"""Utilities for source files: provenance readback and mesh binning.
+
+Also contains the deprecated ``pregenerate_source`` (FileSource pre-sampling);
+see its docstring for why it must not be used for birth-cell attribution.
+"""
 
 import os
+import warnings
 from pathlib import Path
 
+import h5py
 import numpy as np
 import openmc
 import openmc.lib
+
+
+def read_initial_source(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
+    """Read an ``initial_source.h5`` written by ``settings.write_initial_source = True``.
+
+    In eigenvalue mode OpenMC writes the realized initial source bank in particle-id
+    order, so row ``i`` is the birth site of the particle with id ``i + 1`` and
+    ``bank[parent_id - 1]`` is a valid collision->birth join (1-based parent_id).
+
+    Must be read with h5py: ``openmc.read_source_file`` raises ``KeyError`` on this
+    file because OpenMC omits the ``filetype`` attribute from the initial-source dump.
+
+    Returns
+    -------
+    (xyz, bank)
+        ``xyz`` is an (N, 3) float array of birth positions; ``bank`` is the full
+        structured source-bank array (r, u, E, time, wgt, delayed_group, ...).
+    """
+    with h5py.File(str(path), "r") as f:
+        bank = f["source_bank"][()]
+    r = bank["r"]
+    if r.dtype.names:  # compound (x, y, z) fields
+        xyz = np.stack([r["x"], r["y"], r["z"]], axis=1).astype(float)
+    else:  # plain (N, 3) subarray
+        xyz = np.asarray(r, dtype=float).reshape(len(bank), 3)
+    return xyz, bank
 
 
 def pregenerate_source(
@@ -34,7 +66,20 @@ def pregenerate_source(
     -------
     Path
         Absolute path to the generated source HDF5 file.
+
+    .. deprecated::
+        FileSource samples a *random* file row per history, so nothing computed
+        from the file row order can be joined to ``parent_id``. For birth-site
+        provenance use the eigenvalue recipe instead (``write_initial_source=True``
+        with ``batches=1, inactive=0``; see ``read_initial_source`` and
+        ``project.simulations.greens_provenance``).
     """
+    warnings.warn(
+        "pregenerate_source is deprecated: FileSource randomizes the row-to-history "
+        "mapping. Use the eigenvalue write_initial_source recipe for provenance.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     source_path = (output_dir / source_filename).resolve()
@@ -96,14 +141,20 @@ def map_source_to_mesh(
         each source particle. Particles outside all bins get index -1.
     """
     df = openmc.read_source_file(str(source_path)).to_dataframe()
+    xyz = df[["x", "y", "z"]].to_numpy()
+    return map_positions_to_mesh(xyz, mesh)
 
-    x = df["x"].to_numpy()
-    y = df["y"].to_numpy()
-    z = df["z"].to_numpy()
 
+def map_positions_to_mesh(xyz: np.ndarray, mesh: openmc.SphericalMesh) -> np.ndarray:
+    """Bin (N, 3) Cartesian positions into flat spherical-mesh cell indices.
+
+    Same conventions as ``map_source_to_mesh`` (r fastest, phi slowest; -1 for
+    out-of-mesh positions) but takes positions directly, so it works with banks
+    that ``openmc.read_source_file`` cannot read (e.g. ``initial_source.h5``).
+    """
     # Spherical coordinates relative to mesh origin
     ox, oy, oz = mesh.origin
-    dx, dy, dz = x - ox, y - oy, z - oz
+    dx, dy, dz = xyz[:, 0] - ox, xyz[:, 1] - oy, xyz[:, 2] - oz
 
     r = np.sqrt(dx**2 + dy**2 + dz**2)
     theta = np.arccos(np.clip(dz / np.maximum(r, 1e-30), -1, 1))
