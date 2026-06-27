@@ -24,10 +24,11 @@ import h5py
 import numpy as np
 import openmc
 
-from project.core.geometry import core_with_detector
+from project.core.geometry import DETECTOR_CELL_ID, core_with_detector
 from project.core.materials import detector_material, mixture_material
 from project.core.rossi_mesh import KEFF_CONFIGS, N_RADIAL, N_THETA
 from project.core.simulation import Simulation
+from project.core.sources import confined_cell_source
 
 N_PARTICLES = {"098": 200_000, "090": 300_000, "070": 400_000, "040": 500_000}
 
@@ -71,23 +72,8 @@ def critical_cells(R: float) -> dict:
     return {k: (*v, dist(*v)) for k, v in cells.items()}
 
 
-def confined_source(r_lo, r_hi, cos_lo, cos_hi) -> openmc.IndependentSource:
-    return openmc.IndependentSource(
-        space=openmc.stats.SphericalIndependent(
-            r=openmc.stats.PowerLaw(r_lo, r_hi, 2),       # uniform-volume within shell
-            cos_theta=openmc.stats.Uniform(cos_lo, cos_hi),
-            phi=openmc.stats.Uniform(0, 2 * np.pi),
-            origin=(0.0, 0.0, 0.0),
-        ),
-        energy=openmc.stats.Watt(a=0.988e6, b=2.249e-6),
-        time=openmc.stats.Discrete([0.0], [1.0]),
-        strength=1.0,
-    )
-
-
 def run_cell(label: str, R: float, cell_def: tuple, n: int) -> dict:
     r_lo, r_hi, cos_lo, cos_hi, dist = cell_def
-    openmc.reset_auto_ids()  # detector cell -> id 2 deterministically
     geometry = core_with_detector(
         core_center=(0.0, 0.0, 0.0),
         core_radius=R,
@@ -98,8 +84,10 @@ def run_cell(label: str, R: float, cell_def: tuple, n: int) -> dict:
         "run_mode": "fixed source",
         "batches": 1,
         "particles": n,
-        "collision_track": {"max_collisions": 50 * n, "reactions": [101], "cell_ids": [2]},
-        "source": confined_source(r_lo, r_hi, cos_lo, cos_hi),
+        "collision_track": {
+            "max_collisions": 50 * n, "reactions": [101], "cell_ids": [DETECTOR_CELL_ID],
+        },
+        "source": confined_cell_source(r_lo, r_hi, cos_lo, cos_hi),
     }
     sim = Simulation(
         materials=openmc.Materials([mixture_material, detector_material]),
