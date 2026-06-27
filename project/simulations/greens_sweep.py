@@ -15,6 +15,15 @@ the Rossi/ACDC correlated-pair formula R(tau) = sum_i F_i * integral g_i(t) g_i(
 
 Run one k_eff:   python -m project.simulations.greens_sweep 098 [n_r n_theta N]
 Output:          project/results/greens-sweep-k<label>.npz
+
+Optional cross-check (--tally-gt): in the SAME run, also measure g_i(t) with a
+native CellFilter x TimeFilter absorption tally (stored as `g_t_tally` in the
+npz, per source neutron). This does NOT replace the collision_track g_i(t) that
+the ACDC method consumes -- it runs alongside it so the two estimators of the
+same g_i(t) can be compared head-to-head. Over the prompt window (<=10 ms) the
+tally and the prompt-only collision histogram measure the same thing: delayed
+detections land at much later times (precursor decay ~0.1-10 s), so they fall
+outside the window and don't contaminate the comparison.
 """
 import sys
 from pathlib import Path
@@ -39,6 +48,10 @@ N_PARTICLES = 120_000
 T_MAX = 1.0e-2          # 10 ms covers the prompt decay (~2.6 ms)
 N_T = 512
 
+# Tally analogue of the collision_track reactions=[101] detection: B-10 has no
+# fission, so 'absorption' in the detector cell == the (n,a)+(n,g) capture rate.
+DETECTION_SCORE = "absorption"
+
 
 def coarse_edges(R: float, n_r: int, n_th: int):
     r_edges = R * np.linspace(0, 1, n_r + 1) ** (1 / 3)   # equal-volume shells
@@ -46,7 +59,8 @@ def coarse_edges(R: float, n_r: int, n_th: int):
     return r_edges, cos_edges
 
 
-def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10.0):
+def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10.0,
+            tally_gt=False):
     det_z = R + gap + 5.0  # detector CENTER on +Z (gap to surface + detector radius)
     geometry = core_with_detector(
         core_center=(0.0, 0.0, 0.0), core_radius=R,
@@ -66,6 +80,18 @@ def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10
         name=f"greens-sweep-k{label}-cell",   # reused dir; only the .h5 matters per-cell
     )
     sim.build()
+    if tally_gt:
+        # Native g_i(t): absorption rate in the detector cell, binned by detection
+        # time on the SAME edges as the collision histogram. batches=1 here (forced
+        # by collision_track), so this is a single-realization mean with no std_dev
+        # -- enough for a shape/normalization cross-check against g_hist.
+        gt_tally = openmc.Tally(name="g_of_t")
+        gt_tally.filters = [
+            openmc.CellFilter([DETECTOR_CELL_ID]),
+            openmc.TimeFilter(time_edges),
+        ]
+        gt_tally.scores = [DETECTION_SCORE]
+        sim.model.tallies = openmc.Tallies([gt_tally])
     sim.run()
     with h5py.File(sim.output_dir / "collision_track.h5", "r") as f:
         a = f["collision_track_bank"][()]
@@ -75,14 +101,19 @@ def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10
     n_prompt = int(prompt.sum())
     r_c, cos_c = 0.5 * (r_lo + r_hi), 0.5 * (cos_lo + cos_hi)
     dist = float(np.sqrt(r_c**2 + det_z**2 - 2 * r_c * det_z * cos_c))
-    # per-run wall time (the per-cell dir is overwritten each cell, so read NOW)
+    # per-run wall time + optional tally g(t) (the per-cell dir is overwritten each
+    # cell, so read NOW). g_tally is detections per SOURCE neutron per time bin,
+    # directly comparable to g_hist / n.
+    g_tally = None
     with openmc.StatePoint(str(sim.output_dir / "statepoint.1.h5")) as sp:
         runtime = dict(sp.runtime)
+        if tally_gt:
+            g_tally = sp.get_tally(name="g_of_t").mean.ravel().astype(float)
     return {
         "n_prompt": n_prompt, "g_hist": g_hist, "dist": dist,
         "r_mid": r_c, "cos_mid": cos_c, "n_total": int(a.shape[0]),
         "events": a, "transport_s": float(runtime["transport"]),
-        "total_s": float(runtime["total"]),
+        "total_s": float(runtime["total"]), "g_tally": g_tally,
     }
 
 
@@ -99,6 +130,10 @@ def parse_args(argv=None):
     p.add_argument("--save-events", action="store_true",
                    help="save raw per-cell detection events (time, parent_id, delayed_group) "
                         "to <out>-events.h5 for chain-level error analysis")
+    p.add_argument("--tally-gt", action="store_true",
+                   help="also measure g_i(t) with a native CellxTime absorption tally "
+                        "(stored as g_t_tally) for a head-to-head check against the "
+                        "collision_track g_i(t); does not change the collision method")
     p.add_argument("--cells", nargs="*", default=None, metavar="IR,ITH",
                    help="run only these coarse cells (e.g. --cells 7,0 7,9 0,0)")
     p.add_argument("--tag", default="",
@@ -131,6 +166,7 @@ if __name__ == "__main__":
     r_mid = np.zeros((n_r, n_th))
     cos_mid = np.zeros((n_r, n_th))
     g_t = np.zeros((n_r, n_th, N_T))
+    g_t_tally = np.zeros((n_r, n_th, N_T))   # native tally g_i(t), per source neutron
     transport_s = np.zeros((n_r, n_th))
     total_s = np.zeros((n_r, n_th))
 
@@ -143,7 +179,7 @@ if __name__ == "__main__":
         res = run_one(
             R, label, ir, ith,
             r_edges[ir], r_edges[ir + 1], cos_edges[ith + 1], cos_edges[ith],
-            n, time_edges, gap=args.gap,
+            n, time_edges, gap=args.gap, tally_gt=args.tally_gt,
         )
         G[ir, ith] = res["n_prompt"] / n
         G_err[ir, ith] = G[ir, ith] / np.sqrt(max(res["n_prompt"], 1))
@@ -155,8 +191,13 @@ if __name__ == "__main__":
         g_t[ir, ith] = res["g_hist"]
         transport_s[ir, ith] = res["transport_s"]
         total_s[ir, ith] = res["total_s"]
-        print(f"  cell ({ir:2d},{ith:2d}): G={G[ir, ith]:.3e}  "
-              f"n_prompt={res['n_prompt']:6d}  transport={res['transport_s']:.2f}s")
+        msg = (f"  cell ({ir:2d},{ith:2d}): G={G[ir, ith]:.3e}  "
+               f"n_prompt={res['n_prompt']:6d}  transport={res['transport_s']:.2f}s")
+        if res["g_tally"] is not None:
+            g_t_tally[ir, ith] = res["g_tally"]
+            # time-integrated tally detections/source vs collision G (should agree)
+            msg += f"  G_tally={res['g_tally'].sum():.3e}"
+        print(msg)
         if events_file is not None:
             grp = events_file.create_group(f"cell_{ir}_{ith}")
             a = res["events"]
@@ -177,7 +218,7 @@ if __name__ == "__main__":
             r_edges=r_edges, cos_edges=cos_edges, time_edges=time_edges,
             G=G, G_err=G_err, n_prompt=n_prompt, n_total=n_total,
             dist=dist, r_mid=r_mid, cos_mid=cos_mid, g_t=g_t,
-            transport_s=transport_s, total_s=total_s,
+            g_t_tally=g_t_tally, transport_s=transport_s, total_s=total_s,
         )
         print(f"Saved -> {out}  (near/far G ratio ~ {G[-1,0]/max(G[-1,-1],1e-12):.1f})")
         print(f"  total transport {transport_s.sum():.1f}s, total wall {total_s.sum():.1f}s")
