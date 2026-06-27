@@ -27,19 +27,49 @@ from project.core.rossi_mesh import KEFF_CONFIGS, N_RADIAL, N_THETA
 RESULTS_ROOT = Path(__file__).resolve().parent.parent / "results"
 NU_NU_MINUS_1 = 4.63  # U235 second factorial moment of fission multiplicity
 
-# label -> directory of the global (uniform-source) run holding the fission tally
-_FISSION_DIR = {
+# Legacy result-directory names for the global (uniform-source) fission-tally runs.
+# New runs of `greens_function` write to greens-function-k<label>; existing results
+# under the old names keep loading via the fallback in _fission_dir().
+_LEGACY_FISSION_DIR = {
     "098": "greens-function-simulation",
     "090": "greens-function-k090",
     "070": "greens-function-k070",
     "040": "greens-function-k040",
 }
+
+
+def _fission_dir(label: str) -> Path:
+    candidates = [RESULTS_ROOT / f"greens-function-k{label}"]
+    if label in _LEGACY_FISSION_DIR:
+        candidates.append(RESULTS_ROOT / _LEGACY_FISSION_DIR[label])
+    for d in candidates:
+        if (d / "statepoint.1.h5").exists():
+            return d
+    raise FileNotFoundError(
+        f"No fission-tally run for k{label}: looked in {[str(c) for c in candidates]}. "
+        f"Run `python -m project.simulations.greens_function {label}` first."
+    )
 K_OF_LABEL = {v["label"].replace("k", ""): k for k, v in KEFF_CONFIGS.items()}
 
 
 def load_sweep(label: str) -> dict:
     """Load a corrected per-cell sweep .npz into a plain dict of arrays."""
-    f = np.load(RESULTS_ROOT / f"greens-sweep-k{label}.npz")
+    return _load_npz(f"greens-sweep-k{label}.npz", label)
+
+
+def load_provenance(label: str) -> dict:
+    """Load a single-run provenance .npz (greens_provenance) into a plain dict.
+
+    Same schema as load_sweep, but the kernel is the DIRECT (first-generation,
+    unmultiplied) per-cell response g0_i(t): the eigenvalue provenance recipe does
+    not transport fission progeny (gate verdict FIRST-GENERATION-ONLY in
+    diagnostics.chain_completeness_check). Use load_sweep for the full-chain g_i.
+    """
+    return _load_npz(f"greens-provenance-k{label}.npz", label)
+
+
+def _load_npz(filename: str, label: str) -> dict:
+    f = np.load(RESULTS_ROOT / filename)
     d = {key: f[key] for key in f.files}
     d["label"] = label
     d["k"] = float(d["k"])
@@ -55,7 +85,7 @@ def fission_coarse(label: str, n_r: int, n_th: int) -> np.ndarray:
     """
     if N_RADIAL % n_r or N_THETA % n_th:
         raise ValueError(f"coarse grid {n_r}x{n_th} must divide fine {N_RADIAL}x{N_THETA}")
-    res_dir = RESULTS_ROOT / _FISSION_DIR[label]
+    res_dir = _fission_dir(label)
     with openmc.StatePoint(str(res_dir / "statepoint.1.h5")) as sp:
         F_tally = sp.get_tally(name="fission_per_cell").mean.flatten()  # flat: i_theta*N_RADIAL + i_r
     F_fine = F_tally.reshape(N_THETA, N_RADIAL)                  # (theta, r)
@@ -230,11 +260,13 @@ def rossi(sweep: dict, F_coarse: np.ndarray, tau_max: float = 1e-2, n_tau: int =
     n_r, n_th = g_t.shape[:2]
     for ir in range(n_r):
         for ith in range(n_th):
-            g = g_t[ir, ith] / n                    # per-source rate
-            if g.sum() * n < 2:                     # need >=2 events for a pair
+            p = g_t[ir, ith] / n                    # detection PROBABILITY per bin, per source
+            if p.sum() * n < 2:                     # need >=2 events for a pair
                 continue
-            corr = sp_correlate(g, g, mode="full", method="fft")
-            R_tau += F_coarse[ir, ith] * corr[n_t: n_t + n_lag] * dt
+            corr = sp_correlate(p, p, mode="full", method="fft")
+            # integral g(t)g(t+tau)dt with rates g = p/dt:
+            # sum_a (p_a/dt)(p_{a+lag}/dt) * dt = sum_a p_a p_{a+lag} / dt
+            R_tau += F_coarse[ir, ith] * corr[n_t: n_t + n_lag] / dt
     return tau_centers, R_tau
 
 

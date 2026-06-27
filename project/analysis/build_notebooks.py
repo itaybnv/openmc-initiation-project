@@ -489,7 +489,7 @@ import openmc
 fig, ax = plt.subplots(figsize=(9, 5))
 for L in LABELS:
     s = sweeps[L]; R = s["R"]
-    res_dir = gl.RESULTS_ROOT / gl._FISSION_DIR[L]
+    res_dir = gl._fission_dir(L)
     with openmc.StatePoint(str(res_dir / "statepoint.1.h5")) as sp:
         Ft = sp.get_tally(name="fission_per_cell").mean.flatten().reshape(N_THETA, N_RADIAL)
     F_radial = Ft.sum(axis=0)
