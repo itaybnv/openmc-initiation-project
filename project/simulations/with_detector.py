@@ -1,6 +1,6 @@
 import openmc
 
-from project.core.geometry import core_with_detector
+from project.core.geometry import CORE_CELL_ID, core_with_detector
 from project.core.materials import mixture_material, detector_material
 from project.core.physics_config import detector_settings
 from project.core.rossi_mesh import CORE_RADIUS
@@ -14,10 +14,9 @@ geometry = core_with_detector(
     detector_center=(0.0, CORE_RADIUS + 10.0 + 5.0, 0.0),
     detector_radius=5.0,
 )
-settings = detector_settings
+settings = detector_settings()
 
-# Core cell (id=1) filter for fission tallies
-cell_filter = openmc.CellFilter(geometry.get_all_cells()[1])
+cell_filter = openmc.CellFilter(geometry.get_all_cells()[CORE_CELL_ID])
 fission_tally = openmc.Tally(name="fission")
 fission_tally.filters = [cell_filter]
 fission_tally.scores = ["fission"]

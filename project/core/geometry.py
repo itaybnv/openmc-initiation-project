@@ -4,7 +4,21 @@ import openmc
 from .materials import mixture_material, detector_material
 from .rossi_mesh import CORE_RADIUS
 
-__all__ = ["core_sphere", "core_with_detector", "core_with_perfect_detector"]
+__all__ = [
+    "core_sphere",
+    "core_with_detector",
+    "core_with_perfect_detector",
+    "CORE_CELL_ID",
+    "DETECTOR_CELL_ID",
+    "VOID_CELL_ID",
+]
+
+# Explicit cell ids so downstream settings (e.g. collision_track cell_ids) never
+# depend on auto-id assignment order. Id 2 is the detector in every geometry that
+# has one; core_sphere leaves it unused.
+CORE_CELL_ID = 1
+DETECTOR_CELL_ID = 2
+VOID_CELL_ID = 3
 
 _DET_RADIUS = 5.0
 _DET_GAP = 10.0  # gap between core surface and detector inner surface
@@ -37,11 +51,12 @@ def core_sphere(
     openmc.Geometry
         The geometry object representing the spherical core.
     """
+    openmc.reset_auto_ids()
     core_surface = openmc.Sphere(r=radius, x0=center[0], y0=center[1], z0=center[2])
     outer_surface = openmc.Sphere(r=radius + 1.0, boundary_type="vacuum")
 
-    core_cell = openmc.Cell(region=-core_surface, fill=mixture_material)
-    void_cell = openmc.Cell(region=+core_surface & -outer_surface)
+    core_cell = openmc.Cell(cell_id=CORE_CELL_ID, region=-core_surface, fill=mixture_material)
+    void_cell = openmc.Cell(cell_id=VOID_CELL_ID, region=+core_surface & -outer_surface)
 
     return openmc.Geometry([core_cell, void_cell])
 
@@ -84,6 +99,7 @@ def core_with_detector(
     openmc.Geometry
         The geometry object representing the core and detector.
     """
+    openmc.reset_auto_ids()
     core_surface = openmc.Sphere(
         r=core_radius, x0=core_center[0], y0=core_center[1], z0=core_center[2]
     )
@@ -101,9 +117,13 @@ def core_with_detector(
 
     outer_surface = openmc.Sphere(r=max_d + 1.0, boundary_type="vacuum")
 
-    core_cell = openmc.Cell(region=-core_surface, fill=mixture_material)
-    detector_cell = openmc.Cell(region=-detector_surface, fill=detector_material)
-    void_cell = openmc.Cell(region=+core_surface & +detector_surface & -outer_surface)
+    core_cell = openmc.Cell(cell_id=CORE_CELL_ID, region=-core_surface, fill=mixture_material)
+    detector_cell = openmc.Cell(
+        cell_id=DETECTOR_CELL_ID, region=-detector_surface, fill=detector_material
+    )
+    void_cell = openmc.Cell(
+        cell_id=VOID_CELL_ID, region=+core_surface & +detector_surface & -outer_surface
+    )
 
     return openmc.Geometry([core_cell, void_cell, detector_cell])
 
@@ -125,16 +145,21 @@ def core_with_perfect_detector(
     openmc.Geometry
         The geometry object representing the core and perfect detector.
     """
+    openmc.reset_auto_ids()
     core_surface = openmc.Sphere(r=core_radius)
     detector_inner_surface = openmc.Sphere(r=detector_inner_radius)
     detector_outer_surface = openmc.Sphere(
         r=detector_outer_radius, boundary_type="vacuum"
     )
 
-    core_cell = openmc.Cell(region=-core_surface, fill=mixture_material)
+    core_cell = openmc.Cell(cell_id=CORE_CELL_ID, region=-core_surface, fill=mixture_material)
     detector_cell = openmc.Cell(
-        region=-detector_outer_surface & +detector_inner_surface, fill=detector_material
+        cell_id=DETECTOR_CELL_ID,
+        region=-detector_outer_surface & +detector_inner_surface,
+        fill=detector_material,
     )
-    void_cell = openmc.Cell(region=+core_surface & -detector_inner_surface)
+    void_cell = openmc.Cell(
+        cell_id=VOID_CELL_ID, region=+core_surface & -detector_inner_surface
+    )
 
     return openmc.Geometry([core_cell, detector_cell, void_cell])

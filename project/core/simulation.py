@@ -27,8 +27,10 @@ class Simulation:
         """
         self.materials = materials
         self.geometry = geometry
-        self.settings = settings
+        # Copy so later mutation of the caller's dict cannot change the build.
+        self.settings = dict(settings)
         self.name = name
+        self.model: openmc.Model | None = None
         self.output_dir = Path(__file__).parent.parent / "results" / name
 
     def build(self) -> openmc.Model:

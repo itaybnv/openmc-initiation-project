@@ -26,7 +26,7 @@ geometry = core_with_detector(
     detector_center=(0.0, CORE_RADIUS + 10.0 + 5.0, 0.0),
     detector_radius=5.0,
 )
-settings = detector_settings
+settings = detector_settings()
 
 settings["source"] = openmc.IndependentSource(
     space=openmc.stats.SphericalIndependent(
