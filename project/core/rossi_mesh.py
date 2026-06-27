@@ -14,8 +14,12 @@ CORE_RADIUS: float = (
 # Each k_eff value is within ±0.005 of the target.
 KEFF_CONFIGS: dict[float, dict] = {
     0.98: {"radius": 28.700, "label": "k098"},
+    0.95: {"radius": 26.990, "label": "k095"},  # measured k_eff 0.9508
     0.90: {"radius": 24.500, "label": "k090"},
+    0.80: {"radius": 20.700, "label": "k080"},  # measured k_eff 0.8048
     0.70: {"radius": 17.700, "label": "k070"},
+    0.60: {"radius": 15.190, "label": "k060"},  # measured k_eff 0.5996
+    0.50: {"radius": 13.030, "label": "k050"},  # measured k_eff 0.4925
     0.40: {"radius": 11.400, "label": "k040"},
 }
 

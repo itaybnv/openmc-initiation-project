@@ -5,6 +5,9 @@ Usage:
 
 Writes output to project/results/eigenvalue_r<radius>/ and prints
 the final k_eff (value, std) for that radius.
+
+For calibrating a radius to a TARGET k, prefer the automated criticality search:
+    python -m project.simulations.calibrate_keff <target_k|all>
 """
 import sys
 from pathlib import Path
