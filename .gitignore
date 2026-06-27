@@ -23,5 +23,6 @@ __pycache__/
 
 CLAUDE.md
 
-# Claude Code local settings
+# Editor / Claude Code local settings
+.vscode/
 .claude/
