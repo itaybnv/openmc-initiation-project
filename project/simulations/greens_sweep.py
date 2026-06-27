@@ -23,10 +23,12 @@ import h5py
 import numpy as np
 import openmc
 
-from project.core.geometry import core_with_detector
+from project.core.geometry import DETECTOR_CELL_ID, core_with_detector
 from project.core.materials import detector_material, mixture_material
+from project.core.physics_config import detector_max_collisions
 from project.core.rossi_mesh import KEFF_CONFIGS
 from project.core.simulation import Simulation
+from project.core.sources import confined_cell_source
 
 # coarse sweep grid + statistics (overridable via argv)
 N_R_COARSE = 8
@@ -44,30 +46,19 @@ def coarse_edges(R: float, n_r: int, n_th: int):
     return r_edges, cos_edges
 
 
-def confined_source(r_lo, r_hi, cos_lo, cos_hi):
-    return openmc.IndependentSource(
-        space=openmc.stats.SphericalIndependent(
-            r=openmc.stats.PowerLaw(r_lo, r_hi, 2),
-            cos_theta=openmc.stats.Uniform(cos_lo, cos_hi),
-            phi=openmc.stats.Uniform(0, 2 * np.pi),
-            origin=(0.0, 0.0, 0.0),
-        ),
-        energy=openmc.stats.Watt(a=0.988e6, b=2.249e-6),
-        time=openmc.stats.Discrete([0.0], [1.0]),
-        strength=1.0,
-    )
-
-
-def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges):
-    openmc.reset_auto_ids()
+def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10.0):
+    det_z = R + gap + 5.0  # detector CENTER on +Z (gap to surface + detector radius)
     geometry = core_with_detector(
         core_center=(0.0, 0.0, 0.0), core_radius=R,
-        detector_center=(0.0, 0.0, R + 15.0), detector_radius=5.0,
+        detector_center=(0.0, 0.0, det_z), detector_radius=5.0,
     )
     settings = {
         "run_mode": "fixed source", "batches": 1, "particles": n,
-        "collision_track": {"max_collisions": 50 * n, "reactions": [101], "cell_ids": [2]},
-        "source": confined_source(r_lo, r_hi, cos_lo, cos_hi),
+        "collision_track": {
+            "max_collisions": detector_max_collisions(n), "reactions": [101],
+            "cell_ids": [DETECTOR_CELL_ID],
+        },
+        "source": confined_cell_source(r_lo, r_hi, cos_lo, cos_hi),
     }
     sim = Simulation(
         materials=openmc.Materials([mixture_material, detector_material]),
@@ -83,21 +74,54 @@ def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges):
     g_hist, _ = np.histogram(t, bins=time_edges)
     n_prompt = int(prompt.sum())
     r_c, cos_c = 0.5 * (r_lo + r_hi), 0.5 * (cos_lo + cos_hi)
-    det_z = R + 15.0
     dist = float(np.sqrt(r_c**2 + det_z**2 - 2 * r_c * det_z * cos_c))
-    return n_prompt, g_hist, dist, r_c, cos_c, int(a.shape[0])
+    # per-run wall time (the per-cell dir is overwritten each cell, so read NOW)
+    with openmc.StatePoint(str(sim.output_dir / "statepoint.1.h5")) as sp:
+        runtime = dict(sp.runtime)
+    return {
+        "n_prompt": n_prompt, "g_hist": g_hist, "dist": dist,
+        "r_mid": r_c, "cos_mid": cos_c, "n_total": int(a.shape[0]),
+        "events": a, "transport_s": float(runtime["transport"]),
+        "total_s": float(runtime["total"]),
+    }
+
+
+def parse_args(argv=None):
+    import argparse
+
+    p = argparse.ArgumentParser(description="Confined-source per-cell Green's function sweep")
+    p.add_argument("label", nargs="?", default="098")
+    p.add_argument("n_r", nargs="?", type=int, default=N_R_COARSE)
+    p.add_argument("n_th", nargs="?", type=int, default=N_TH_COARSE)
+    p.add_argument("n", nargs="?", type=int, default=N_PARTICLES)
+    p.add_argument("--gap", type=float, default=10.0,
+                   help="core-surface-to-detector gap [cm] (detector center at R+gap+5)")
+    p.add_argument("--save-events", action="store_true",
+                   help="save raw per-cell detection events (time, parent_id, delayed_group) "
+                        "to <out>-events.h5 for chain-level error analysis")
+    p.add_argument("--cells", nargs="*", default=None, metavar="IR,ITH",
+                   help="run only these coarse cells (e.g. --cells 7,0 7,9 0,0)")
+    p.add_argument("--tag", default="",
+                   help="extra output-name suffix (e.g. -gap10 to avoid clobbering "
+                        "an existing default-name npz with a different grid/budget)")
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
-    label = sys.argv[1] if len(sys.argv) > 1 else "098"
-    n_r = int(sys.argv[2]) if len(sys.argv) > 2 else N_R_COARSE
-    n_th = int(sys.argv[3]) if len(sys.argv) > 3 else N_TH_COARSE
-    n = int(sys.argv[4]) if len(sys.argv) > 4 else N_PARTICLES
+    args = parse_args()
+    label, n_r, n_th, n = args.label, args.n_r, args.n_th, args.n
+    suffix = ("" if args.gap == 10.0 else f"-gap{args.gap:g}") + args.tag
 
     target_k = [k for k, v in KEFF_CONFIGS.items() if v["label"] == f"k{label}"][0]
     R = KEFF_CONFIGS[target_k]["radius"]
     time_edges = np.linspace(0.0, T_MAX, N_T + 1)
     r_edges, cos_edges = coarse_edges(R, n_r, n_th)
+
+    cells = (
+        [(ir, ith) for ir in range(n_r) for ith in range(n_th)]
+        if args.cells is None
+        else [tuple(int(x) for x in c.split(",")) for c in args.cells]
+    )
 
     G = np.zeros((n_r, n_th))
     G_err = np.zeros((n_r, n_th))
@@ -107,29 +131,53 @@ if __name__ == "__main__":
     r_mid = np.zeros((n_r, n_th))
     cos_mid = np.zeros((n_r, n_th))
     g_t = np.zeros((n_r, n_th, N_T))
+    transport_s = np.zeros((n_r, n_th))
+    total_s = np.zeros((n_r, n_th))
 
-    print(f"Sweep k={target_k} R={R} grid {n_r}x{n_th}={n_r*n_th} cells, N={n:,}/cell")
-    for ir in range(n_r):
-        for ith in range(n_th):
-            npr, gh, d, rc, cc, ntot = run_one(
-                R, label, ir, ith,
-                r_edges[ir], r_edges[ir + 1], cos_edges[ith + 1], cos_edges[ith], n, time_edges,
-            )
-            G[ir, ith] = npr / n
-            G_err[ir, ith] = (npr / n) / np.sqrt(max(npr, 1))
-            n_prompt[ir, ith] = npr
-            n_total[ir, ith] = ntot
-            dist[ir, ith] = d
-            r_mid[ir, ith] = rc
-            cos_mid[ir, ith] = cc
-            g_t[ir, ith] = gh
-        print(f"  r-shell {ir}: G(theta)= " + " ".join(f"{x:.2e}" for x in G[ir]))
+    out_base = Path(__file__).parent.parent / "results" / f"greens-sweep-k{label}{suffix}"
+    events_file = h5py.File(f"{out_base}-events.h5", "w") if args.save_events else None
 
-    out = Path(__file__).parent.parent / "results" / f"greens-sweep-k{label}.npz"
-    np.savez_compressed(
-        out, k=target_k, R=R, n_source=n,
-        r_edges=r_edges, cos_edges=cos_edges, time_edges=time_edges,
-        G=G, G_err=G_err, n_prompt=n_prompt, n_total=n_total,
-        dist=dist, r_mid=r_mid, cos_mid=cos_mid, g_t=g_t,
-    )
-    print(f"Saved -> {out}  (near/far G ratio ~ {G[-1,0]/max(G[-1,-1],1e-12):.1f})")
+    print(f"Sweep k={target_k} R={R} gap={args.gap} grid {n_r}x{n_th}, "
+          f"{len(cells)} cell(s), N={n:,}/cell")
+    for ir, ith in cells:
+        res = run_one(
+            R, label, ir, ith,
+            r_edges[ir], r_edges[ir + 1], cos_edges[ith + 1], cos_edges[ith],
+            n, time_edges, gap=args.gap,
+        )
+        G[ir, ith] = res["n_prompt"] / n
+        G_err[ir, ith] = G[ir, ith] / np.sqrt(max(res["n_prompt"], 1))
+        n_prompt[ir, ith] = res["n_prompt"]
+        n_total[ir, ith] = res["n_total"]
+        dist[ir, ith] = res["dist"]
+        r_mid[ir, ith] = res["r_mid"]
+        cos_mid[ir, ith] = res["cos_mid"]
+        g_t[ir, ith] = res["g_hist"]
+        transport_s[ir, ith] = res["transport_s"]
+        total_s[ir, ith] = res["total_s"]
+        print(f"  cell ({ir:2d},{ith:2d}): G={G[ir, ith]:.3e}  "
+              f"n_prompt={res['n_prompt']:6d}  transport={res['transport_s']:.2f}s")
+        if events_file is not None:
+            grp = events_file.create_group(f"cell_{ir}_{ith}")
+            a = res["events"]
+            grp.create_dataset("time", data=a["time"])
+            grp.create_dataset("parent_id", data=a["parent_id"])
+            grp.create_dataset("delayed_group", data=a["delayed_group"])
+            grp.attrs["n_source"] = n
+
+    if events_file is not None:
+        events_file.attrs.update({"k": target_k, "R": R, "gap": args.gap, "n_source": n})
+        events_file.close()
+        print(f"Events -> {out_base}-events.h5")
+
+    if args.cells is None:  # only write the full npz for complete sweeps
+        out = Path(f"{out_base}.npz")
+        np.savez_compressed(
+            out, k=target_k, R=R, n_source=n, gap=args.gap,
+            r_edges=r_edges, cos_edges=cos_edges, time_edges=time_edges,
+            G=G, G_err=G_err, n_prompt=n_prompt, n_total=n_total,
+            dist=dist, r_mid=r_mid, cos_mid=cos_mid, g_t=g_t,
+            transport_s=transport_s, total_s=total_s,
+        )
+        print(f"Saved -> {out}  (near/far G ratio ~ {G[-1,0]/max(G[-1,-1],1e-12):.1f})")
+        print(f"  total transport {transport_s.sum():.1f}s, total wall {total_s.sum():.1f}s")
