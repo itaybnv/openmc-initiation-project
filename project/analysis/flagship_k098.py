@@ -1,5 +1,8 @@
 """Flagship k=0.98 analysis on a NATIVE 40 ms record, path-parameterised.
 
+NAME NOTE: the module now also serves the k=0.90 flagship (dataset
+`k090_bench100M`); it keeps the k098 name because other modules import it.
+
 WHY THIS EXISTS. `k098_record_extension` was written to repair one specific dataset:
 it REBUILDS a 40 ms per-cell record from the bench10M event file (because the
 bench10M sweep was histogrammed on a 10 ms grid) and hardwires every path to that
@@ -21,10 +24,16 @@ DATASETS
               k098_record_extension.build_extended_npz + the bench10M events and
               sphere dir. Present today, so every stage below is testable now and
               reproduces the published k=0.98 numbers.
+  k090_bench100M : the k=0.90 flagship (100M sphere + 100M sweep) on the standard
+              10 ms / 512-bin record. Its fit window is FROZEN to
+              rb.FIT_WINDOWS["090"] (the label window every k=0.90 number in the
+              benchmark uses); window() still runs the plateau rule on it and
+              reports what it would have chosen, for information only.
 
 STAGES (all take a dataset name; all reuse rb/kre code paths)
   inputs   sweep npz + per-cell events + sphere events + F + the npz's time grid
   window   plateau-rule fit window and fundamental alpha ON THIS DATASET
+           (informational when the dataset carries a frozen window)
   alphas   ACDC (binned plug-in fit) vs Doubles parent-ID (frozen-w0 MLE) alpha
   gate     absolute-scale overlay sum(R_bf)/sum(R_acdc) over L >= 3, with the
            section-8.4 error bar (Poisson on the masked BF counts (+) M_emp)
@@ -47,7 +56,7 @@ import project.analysis.greens_loader as gl
 import project.analysis.k098_record_extension as kre
 import project.analysis.rossi_benchmark as rb
 
-LABEL = "098"
+LABEL = "098"          # default label, kept for back-compatibility of importers
 DT = rb.DT
 RESULTS = gl.RESULTS_ROOT
 OUT_DIR = Path(__file__).resolve().parent / "outputs" / "flagship_k098"
@@ -59,23 +68,45 @@ OUT_DIR = Path(__file__).resolve().parent / "outputs" / "flagship_k098"
 VETTED_EXT_WINDOW = (0.001365524906003438, 0.009509626505586757)
 VETTED_EXT_ALPHA_FUND = -368.3647561756218
 
+# Per dataset:
+#   label      : k label (indexes rb.KAPPA_S / rb.FIT_WINDOWS / the legacy tally)
+#   fit_window : FROZEN window, used by every stage instead of the plateau rule;
+#                absent => the window is derived from this dataset by window()
+#   ref_window / ref_alpha_fund : comparison values window() reports against
 DATASETS = {
     "bench100M": {
         "sweep_npz": RESULTS / "greens-sweep-k098-bench100M.npz",
         "events": RESULTS / "greens-sweep-k098-bench100M-events.h5",
         "sphere_dir": RESULTS / "greens-function-k098-bench100M",
+        "label": "098",
+        "ref_window": VETTED_EXT_WINDOW,
+        "ref_alpha_fund": VETTED_EXT_ALPHA_FUND,
     },
     "bench10M": {
         "sweep_npz": kre.EXT_NPZ,          # 40 ms rebuild of the 10 ms bench10M sweep
         "events": kre.EVENTS_H5,
         "sphere_dir": kre.SPHERE_DIR,
+        "label": "098",
+        "ref_window": VETTED_EXT_WINDOW,
+        "ref_alpha_fund": VETTED_EXT_ALPHA_FUND,
+    },
+    "k090_bench100M": {
+        "sweep_npz": RESULTS / "greens-sweep-k090-bench100M.npz",
+        "events": RESULTS / "greens-sweep-k090-bench100M-events.h5",
+        "sphere_dir": RESULTS / "greens-function-k090-bench100M",
+        "label": "090",
+        # k=0.90 is not record-limited (1/|alpha| ~ 0.65 ms on a 10 ms record), so
+        # the frozen label window is the one every other k=0.90 number uses.
+        "fit_window": rb.FIT_WINDOWS["090"],
+        "ref_window": rb.FIT_WINDOWS["090"],
+        "ref_alpha_fund": None,
     },
 }
 DEFAULT_DATASET = "bench100M"
 
 # Finest split count that still leaves every split >= rb.BAND_MIN_POINTS band points
 # (COST_ESTIMATOR_REPORT sections 2-3: 10 x 10M at 100M, 5 x 2M at 10M).
-DEFAULT_N_SPLITS = {"bench100M": 10, "bench10M": 5}
+DEFAULT_N_SPLITS = {"bench100M": 10, "bench10M": 5, "k090_bench100M": 10}
 
 # Which fission map weights the ACDC assembly in the alignment-gate statistic.
 #   "legacy"  = rb.fission_coarse_sim(LABEL) -- the legacy label-keyed 1M tally that
@@ -95,12 +126,30 @@ _CACHE: dict = {}
 # (a) inputs
 # --------------------------------------------------------------------------- #
 
-def paths(dataset: str = DEFAULT_DATASET) -> dict:
-    """Resolved file paths for a named dataset (no I/O)."""
+def spec(dataset: str = DEFAULT_DATASET) -> dict:
+    """The DATASETS entry for a named dataset (raises on an unknown name)."""
     if dataset not in DATASETS:
         raise KeyError(f"unknown dataset {dataset!r}; choose from {list(DATASETS)}")
-    p = dict(DATASETS[dataset])
+    return DATASETS[dataset]
+
+
+def label_of(dataset: str = DEFAULT_DATASET) -> str:
+    """k label of a dataset ('098', '090', ...)."""
+    return spec(dataset).get("label", LABEL)
+
+
+def frozen_window(dataset: str = DEFAULT_DATASET):
+    """The dataset's FROZEN fit window, or None when it derives its own."""
+    w = spec(dataset).get("fit_window")
+    return None if w is None else (float(w[0]), float(w[1]))
+
+
+def paths(dataset: str = DEFAULT_DATASET) -> dict:
+    """Resolved file paths for a named dataset (no I/O)."""
+    p = {k: v for k, v in spec(dataset).items()
+         if k in ("sweep_npz", "events", "sphere_dir")}
     p["dataset"] = dataset
+    p["label"] = label_of(dataset)
     p["sphere_track"] = p["sphere_dir"] / "collision_track.h5"
     p["statepoint"] = p["sphere_dir"] / "statepoint.1.h5"
     return p
@@ -149,9 +198,10 @@ def inputs(dataset: str = DEFAULT_DATASET, maxb: int = 500,
     if missing:
         raise FileNotFoundError(f"dataset {dataset!r} is not on disk yet: {missing}")
 
+    lab = label_of(dataset)
     f = np.load(p["sweep_npz"], allow_pickle=False)
     sweep = {k: f[k] for k in f.files}
-    sweep["label"] = LABEL
+    sweep["label"] = lab
     sweep["k"] = float(sweep["k"])
 
     time_edges = np.asarray(sweep["time_edges"], dtype=float)
@@ -171,14 +221,14 @@ def inputs(dataset: str = DEFAULT_DATASET, maxb: int = 500,
     F = rb.fission_coarse_from_dir(p["sphere_dir"], n_r, n_th)
 
     out = {
-        "dataset": dataset, "label": LABEL, "paths": p,
+        "dataset": dataset, "label": lab, "paths": p,
         "sweep": sweep, "time_edges": time_edges, "n_t": n_t, "dt": dt,
         "t_record": float(time_edges[-1]),
         "events": events, "n_cell": int(n_cell), "n_cells": n_cells,
         "n_sweep_total": int(n_cell) * n_cells,
         "df": df, "n_sphere": n_sphere,
         "F": F, "F_raw": F / rb.M_SIM,
-        "F_sim": rb.fission_coarse_sim(LABEL, n_r, n_th),
+        "F_sim": rb.fission_coarse_sim(lab, n_r, n_th),
         "maxb": int(maxb),
     }
     if use_cache:
@@ -192,6 +242,21 @@ def _F(inp: dict, which: str) -> np.ndarray:
     return inp["F"] if which == "matched" else inp["F_sim"]
 
 
+def _acdc_plugin(inp: dict, F: np.ndarray, win, n_boot: int = 100, rng=None):
+    """kre.acdc_plugin_alpha_sigma with the over-dispersion factor put on THIS
+    dataset's label.
+
+    kre's helper is k=0.98 code: it multiplies the Poisson-bootstrap sigma by
+    rb.KAPPA_S['098'] unconditionally. It is an audited estimator, so it is not
+    edited; the kappa is divided back out and re-applied for the dataset's own
+    label instead (a no-op at k=0.98). Returns (alpha, sigma, curve_fit_perr).
+    """
+    a, s, perr = kre.acdc_plugin_alpha_sigma(inp["sweep"], F, win,
+                                             n_boot=n_boot, rng=rng)
+    s *= rb.KAPPA_S[inp["label"]] / rb.KAPPA_S[kre.LABEL]
+    return a, s, perr
+
+
 # --------------------------------------------------------------------------- #
 # (b) window
 # --------------------------------------------------------------------------- #
@@ -202,32 +267,49 @@ def window(dataset: str = DEFAULT_DATASET, f_source: str = "legacy",
 
     kre.plateau_window_ext verbatim (plateau scan -> band-median fundamental ->
     earliest sustained on-plateau start -> 3 decay times), which already sizes its
-    lag range from the sweep's own record instead of a module constant. The vetted
-    extended-record window is returned alongside for comparison.
+    lag range from the sweep's own record instead of a module constant. The
+    dataset's reference window is returned alongside for comparison.
+
+    `window` is the window the stages will actually use: the dataset's FROZEN
+    window when it has one (k090_bench100M), otherwise the derived one. The
+    plateau result is always reported as `derived_window`.
     """
     inp = inputs(dataset)
     r = kre.plateau_window_ext(inp["sweep"], _F(inp, f_source), verbose=verbose)
     lo, hi = float(r["lo"]), float(r["hi"])
+    ref = spec(dataset).get("ref_window", VETTED_EXT_WINDOW)
+    ref_alpha = spec(dataset).get("ref_alpha_fund", VETTED_EXT_ALPHA_FUND)
+    froz = frozen_window(dataset)
+    use = froz if froz is not None else (lo, hi)
     return {
-        "dataset": dataset, "f_source": f_source,
-        "window": (lo, hi), "lo": lo, "hi": hi,
+        "dataset": dataset, "label": inp["label"], "f_source": f_source,
+        "window": use, "lo": use[0], "hi": use[1], "frozen": froz is not None,
+        "derived_window": (lo, hi), "derived_lo": lo, "derived_hi": hi,
         "alpha_fund": float(r["alpha_fund"]),
         "alpha_at_derivation": float(r["alpha"]),
         "tau_decay": float(r["tau_decay"]),
+        "ref_window": tuple(ref), "ref_alpha_fund": ref_alpha,
         "vetted_ext_window": VETTED_EXT_WINDOW,
         "vetted_ext_alpha_fund": VETTED_EXT_ALPHA_FUND,
-        "d_lo_rel": lo / VETTED_EXT_WINDOW[0] - 1.0,
-        "d_hi_rel": hi / VETTED_EXT_WINDOW[1] - 1.0,
+        "d_lo_rel": lo / ref[0] - 1.0,
+        "d_hi_rel": hi / ref[1] - 1.0,
         "lo_grid": r["lo_grid"], "alpha_grid": r["alpha_grid"],
     }
 
 
 def _window_of(dataset, win):
     if win is None:
-        return window(dataset)["window"]
+        froz = frozen_window(dataset)
+        return froz if froz is not None else window(dataset)["window"]
     if isinstance(win, dict):
         return tuple(win["window"])
     return (float(win[0]), float(win[1]))
+
+
+def fit_window(dataset: str = DEFAULT_DATASET):
+    """The window the stages use: the dataset's frozen window if it has one, else
+    the plateau-rule window derived from it. Cheap for a frozen dataset (no I/O)."""
+    return _window_of(dataset, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -240,18 +322,21 @@ def alphas(dataset: str = DEFAULT_DATASET, win=None, n_boot: int = 100,
 
     ACDC   : kre.acdc_plugin_alpha_sigma -- plug-in assembly on the record's own
              grid, binned A + B exp(alpha tau) fit, per-bin Poisson bootstrap x
-             KAPPA_S['098'] for sigma. The curve_fit parameter error is returned too
-             (`sigma_fit`); it is the +/-0.45-class number the gate reports quote,
-             an order of magnitude tighter than the honest bootstrap sigma.
+             KAPPA_S[label] for sigma (see _acdc_plugin). The curve_fit parameter
+             error is returned too (`sigma_fit`); it is the +/-0.45-class number
+             the gate reports quote, an order of magnitude tighter than the honest
+             bootstrap sigma.
     Doubles: rb.bf_alpha_sigma_events -- same-chain pair-separation MLE with the
              delayed floor w0 frozen from the full dataset, chain-bootstrap sigma.
              The MLE Fisher sigma under background='auto' (the number
              kre.alignment_gate_ext prints) is returned as `sigma_fisher`.
+    PK     : rb._ifp_pk_alpha(label) -- the IFP point-kinetics baseline for this k,
+             carried alongside as the external reference (no fit involved).
     """
     inp = inputs(dataset)
     lo, hi = _window_of(dataset, win)
-    a_ac, s_ac, perr = kre.acdc_plugin_alpha_sigma(
-        inp["sweep"], _F(inp, f_source), (lo, hi), n_boot=n_boot, rng=rng)
+    a_ac, s_ac, perr = _acdc_plugin(inp, _F(inp, f_source), (lo, hi),
+                                    n_boot=n_boot, rng=rng)
 
     bf = rb.bf_alpha_sigma_events(inp["df"], (lo, hi), n_boot=n_boot, rng=rng)
     dts = rb.same_parent_pair_dts(inp["df"]["time"].to_numpy(),
@@ -264,13 +349,20 @@ def alphas(dataset: str = DEFAULT_DATASET, win=None, n_boot: int = 100,
             if np.isfinite(s_bf) else np.nan)
     nsig_fit = (abs(a_ac - bf["alpha"]) / float(np.hypot(perr, s_fisher))
                 if np.isfinite(s_fisher) else np.nan)
+    try:
+        k_meas, a_pk = rb._ifp_pk_alpha(inp["label"])
+        pk, pk_err, pk_k = float(a_pk.nominal_value), float(a_pk.std_dev), float(k_meas)
+    except FileNotFoundError:
+        pk = pk_err = pk_k = np.nan
     return {
-        "dataset": dataset, "window": (lo, hi), "f_source": f_source,
+        "dataset": dataset, "label": inp["label"], "window": (lo, hi),
+        "f_source": f_source, "n_boot": int(n_boot),
         "acdc": float(a_ac), "acdc_sigma": float(s_ac), "acdc_sigma_fit": float(perr),
         "bf": float(bf["alpha"]), "bf_sigma": float(s_bf),
         "bf_sigma_fisher": float(s_fisher), "bf_alpha_mle_auto": float(a_mle),
         "bf_censored": bool(bf["censored"]), "n_pairs_window": int(n_pairs),
         "nsigma": float(nsig), "nsigma_fit_errors": float(nsig_fit),
+        "pk": pk, "pk_err": pk_err, "pk_k_measured": pk_k,
     }
 
 
@@ -308,7 +400,8 @@ def moment(dataset: str = DEFAULT_DATASET, n_boot: int = 200, rng=None,
 
 
 def gate(dataset: str = DEFAULT_DATASET, win=None,
-         f_source: str = GATE_F_DEFAULT, n_boot: int = 200, rng=None) -> dict:
+         f_source: str = GATE_F_DEFAULT, n_boot: int = 200, rng=None,
+         m_source: str = "matched") -> dict:
     """Absolute-scale overlay statistic sum(R_bf)/sum(R_acdc) with an error bar.
 
     Mask: tau >= 3*DT and R_acdc > 0 -- the audited lag set L >= 3 of
@@ -323,6 +416,16 @@ def gate(dataset: str = DEFAULT_DATASET, win=None,
 
     The statistic is reported under BOTH fission maps (see GATE_F_DEFAULT): the
     legacy 1M tally the published gate used, and this dataset's matched tally.
+    Each map also gets its OWN M_emp (the identity divides by sum_i F_raw_i G_i^2,
+    so F moves it) and the shape-consistency ratio
+
+        shape_ratio = scale / (M_emp / rb.M_SIM)
+
+    which is 1 when the only thing separating the two absolute curves is the pair
+    moment the assembly was normalised with -- i.e. when the assembled TIME
+    STRUCTURE is right. `m_source` selects which map's M_emp sets the published
+    error bar; it defaults to "matched", the choice the k=0.98 gate was published
+    with, independent of `f_source`.
     """
     inp = inputs(dataset)
     lo, hi = _window_of(dataset, win)
@@ -330,7 +433,9 @@ def gate(dataset: str = DEFAULT_DATASET, win=None,
     df = inp["df"]
     tau_bf, R_bf, counts = rb.bf_rossi(df, inp["n_sphere"], tau_max=inp["t_record"],
                                        n_tau=n_t - 1)
-    mom = moment(dataset, n_boot=n_boot, rng=rng)
+    moments = {which: moment(dataset, n_boot=n_boot, rng=rng, f_source=which)
+               for which in ("legacy", "matched")}
+    mom = moments[m_source]
 
     scales = {}
     for which in ("legacy", "matched"):
@@ -338,10 +443,19 @@ def gate(dataset: str = DEFAULT_DATASET, win=None,
                                     tau_max=inp["t_record"], n_tau=n_t - 1)
         assert np.allclose(tau, tau_bf)
         mask = (tau >= 3 * DT) & (R_acdc > 0)
+        sc = float(R_bf[mask].sum() / R_acdc[mask].sum())
+        mw = moments[which]
+        rel_p = 1.0 / np.sqrt(max(int(counts[mask].sum()), 1))
+        rel_m = mw["M_err"] / mw["M_emp"]
+        ratio = sc / (mw["M_emp"] / rb.M_SIM)
+        rel_r = float(np.hypot(rel_p, rel_m))
         scales[which] = {
-            "scale": float(R_bf[mask].sum() / R_acdc[mask].sum()),
+            "scale": sc,
             "n_pairs_mask": int(counts[mask].sum()),
             "n_lags_mask": int(mask.sum()),
+            "M_emp": mw["M_emp"], "M_err": mw["M_err"],
+            "shape_ratio": ratio, "shape_ratio_err": ratio * rel_r,
+            "shape_nsigma": float(abs(ratio - 1.0) / (ratio * rel_r)),
         }
         if which == f_source:
             tau_keep, R_keep, mask_keep = tau, R_acdc, mask
@@ -351,7 +465,8 @@ def gate(dataset: str = DEFAULT_DATASET, win=None,
     rel_moment = mom["M_err"] / mom["M_emp"]
     rel = float(np.hypot(rel_poisson, rel_moment))
     return {
-        "dataset": dataset, "window": (lo, hi), "f_source": f_source,
+        "dataset": dataset, "label": inp["label"], "window": (lo, hi),
+        "f_source": f_source, "m_source": m_source,
         "scale": s["scale"], "scale_err": s["scale"] * rel, "rel_err": rel,
         "rel_poisson": float(rel_poisson), "rel_moment": float(rel_moment),
         "band": (s["scale"] * (1 - rel), s["scale"] * (1 + rel)),
@@ -359,7 +474,11 @@ def gate(dataset: str = DEFAULT_DATASET, win=None,
         "n_pairs_mask": s["n_pairs_mask"], "n_lags_mask": s["n_lags_mask"],
         "M_emp": mom["M_emp"], "M_err": mom["M_err"],
         "n_chains_detected": mom["n_chains_detected"],
+        "n_sphere": inp["n_sphere"],
+        "shape_ratio": s["shape_ratio"], "shape_ratio_err": s["shape_ratio_err"],
+        "shape_nsigma": s["shape_nsigma"],
         "scale_by_F": {k: v["scale"] for k, v in scales.items()},
+        "by_F": {k: {kk: vv for kk, vv in v.items()} for k, v in scales.items()},
         "tau": tau_keep, "R_acdc": R_keep, "R_bf": R_bf, "counts_bf": counts,
         "mask": mask_keep,
     }
@@ -392,11 +511,10 @@ def cost_inputs(dataset: str = DEFAULT_DATASET, win=None, alpha_ref=None,
     inp = inputs(dataset, maxb=maxb)
     lo, hi = _window_of(dataset, win)
     if alpha_ref is None:
-        alpha_ref = kre.acdc_plugin_alpha_sigma(inp["sweep"], _F(inp, "legacy"),
-                                                (lo, hi), n_boot=0)[0]
+        alpha_ref = _acdc_plugin(inp, _F(inp, "legacy"), (lo, hi), n_boot=0)[0]
     t = inp["df"]["time"].to_numpy()
     p = inp["df"]["parent_id"].to_numpy()
-    return {"label": LABEL, "fit_window": (lo, hi), "df": inp["df"],
+    return {"label": inp["label"], "fit_window": (lo, hi), "df": inp["df"],
             "n_sphere": inp["n_sphere"], "events": inp["events"],
             "n_cell": inp["n_cell"], "n_cells": inp["n_cells"],
             "n_sweep_total": inp["n_sweep_total"], "F": inp["F"],
@@ -490,8 +608,13 @@ def _summary_row(res_costs, m):
 
 
 def run_all(dataset: str = DEFAULT_DATASET, n_splits: int | None = None,
-            n_boot: int = 100, seed: int = 7, write: bool = True) -> dict:
-    """Stages (b)-(e) end to end; writes <dataset>_summary.json and prints a table."""
+            n_boot: int = 100, seed: int = 7, write: bool = True,
+            with_costs: bool = True) -> dict:
+    """Stages (b)-(e) end to end; writes <dataset>_summary.json and prints a table.
+
+    with_costs=False stops after the gate (window + alphas + gate only), which is
+    the physics half of the summary and the part the alignment-gate deck needs.
+    """
     inp = inputs(dataset)
     print(f"[{dataset}] sweep {inp['paths']['sweep_npz'].name}: "
           f"g_t {inp['sweep']['g_t'].shape}, record {inp['t_record'] * 1e3:.1f} ms, "
@@ -499,18 +622,22 @@ def run_all(dataset: str = DEFAULT_DATASET, n_splits: int | None = None,
           f"sphere {inp['n_sphere']:,} histories")
 
     w = window(dataset)
-    print(f"[{dataset}] window = [{w['lo'] * 1e3:.4f}, {w['hi'] * 1e3:.4f}] ms "
-          f"(vetted ext [{VETTED_EXT_WINDOW[0] * 1e3:.4f}, "
-          f"{VETTED_EXT_WINDOW[1] * 1e3:.4f}]; {w['d_lo_rel'] * 100:+.2f}% / "
-          f"{w['d_hi_rel'] * 100:+.2f}%)   alpha_fund = {w['alpha_fund']:.1f} "
-          f"(vetted {VETTED_EXT_ALPHA_FUND:.1f})")
+    ref = w["ref_window"]
+    kind = "frozen" if w["frozen"] else "plateau"
+    print(f"[{dataset}] window ({kind}) = [{w['lo'] * 1e3:.4f}, "
+          f"{w['hi'] * 1e3:.4f}] ms   plateau rule gives "
+          f"[{w['derived_lo'] * 1e3:.4f}, {w['derived_hi'] * 1e3:.4f}] ms "
+          f"(reference [{ref[0] * 1e3:.4f}, {ref[1] * 1e3:.4f}]; "
+          f"{w['d_lo_rel'] * 100:+.2f}% / {w['d_hi_rel'] * 100:+.2f}%)   "
+          f"alpha_fund = {w['alpha_fund']:.1f}")
 
     a = alphas(dataset, w["window"], n_boot=n_boot, rng=seed)
     print(f"[{dataset}] alpha ACDC = {a['acdc']:.2f} +/- {a['acdc_sigma']:.2f} "
           f"(fit err {a['acdc_sigma_fit']:.2f})   "
           f"Doubles = {a['bf']:.2f} +/- {a['bf_sigma']:.2f} "
           f"(Fisher {a['bf_sigma_fisher']:.2f})   "
-          f"agree to {a['nsigma']:.2f} sigma")
+          f"agree to {a['nsigma']:.2f} sigma   "
+          f"PK = {a['pk']:.2f} +/- {a['pk_err']:.2f}")
 
     g = gate(dataset, w["window"], rng=seed)
     print(f"[{dataset}] gate scale Doubles/ACDC = {g['scale']:.4f} +/- "
@@ -521,30 +648,39 @@ def run_all(dataset: str = DEFAULT_DATASET, n_splits: int | None = None,
           f"pairs in mask = {g['n_pairs_mask']:,}   "
           f"[F {g['f_source']}; matched-F scale "
           f"{g['scale_by_F']['matched']:.4f}]")
+    for which, v in g["by_F"].items():
+        print(f"[{dataset}]   F={which:8s} scale {v['scale']:.4f}  "
+              f"M_emp {v['M_emp']:.3f} +/- {v['M_err']:.3f}  "
+              f"scale/(M_emp/M_SIM) = {v['shape_ratio']:.4f} +/- "
+              f"{v['shape_ratio_err']:.4f} ({v['shape_nsigma']:.2f} sigma from 1)")
 
-    c = costs(dataset, w["window"], n_splits=n_splits, alpha_ref=a["acdc"])
-    rows = [_summary_row(c, m) for m in ("acdc", "oracle", "realistic", "die")]
-    print(f"\n[{dataset}] histories to sigma_alpha = 5%|alpha|  "
-          f"(band estimator, {c['n_splits']} splits)")
-    head = (f"{'method':10s} {'band N':>10s} {'pts':>4s} {'split mean':>11s} "
-            f"{'+/- SE':>9s} {'all ok':>7s} {'anchor N':>10s} {'band/ACDC':>10s}")
-    print(head)
-    print("-" * len(head))
-    n_acdc = c["band"]["acdc"]["n_target"]
-    for r in rows:
-        ratio = (r["band"] / n_acdc if np.isfinite(n_acdc) and n_acdc else np.nan)
-        print(f"{r['method']:10s} {r['band']:10.4g} {r['band_points']:4d} "
-              f"{r['split_mean']:11.4g} {r['split_se_full']:9.3g} "
-              f"{str(r['all_splits_usable']):>7s} {r['anchor']:10.4g} "
-              f"{ratio:10.4g}")
-
-    out = {"dataset": dataset, "n_splits": c["n_splits"],
-           "window": _jsonable(w), "alphas": _jsonable(a), "gate": _jsonable(g),
-           "alpha_ref": c["alpha_ref"],
-           "costs": {r["method"]: _jsonable(r) for r in rows},
-           "ratios_vs_acdc": {r["method"]: (r["band"] / n_acdc)
-                              for r in rows if np.isfinite(n_acdc)},
-           "band_rel_cap": rb.BAND_REL_CAP, "band_min_blocks": rb.BAND_MIN_BLOCKS}
+    out = {"dataset": dataset, "label": inp["label"], "k": inp["sweep"]["k"],
+           "n_sphere": inp["n_sphere"], "n_sweep_total": inp["n_sweep_total"],
+           "n_detector_events": int(len(inp["df"])), "m_sim": rb.M_SIM,
+           "window": _jsonable(w), "alphas": _jsonable(a), "gate": _jsonable(g)}
+    c = None
+    if with_costs:
+        c = costs(dataset, w["window"], n_splits=n_splits, alpha_ref=a["acdc"])
+        rows = [_summary_row(c, m) for m in ("acdc", "oracle", "realistic", "die")]
+        print(f"\n[{dataset}] histories to sigma_alpha = 5%|alpha|  "
+              f"(band estimator, {c['n_splits']} splits)")
+        head = (f"{'method':10s} {'band N':>10s} {'pts':>4s} {'split mean':>11s} "
+                f"{'+/- SE':>9s} {'all ok':>7s} {'anchor N':>10s} {'band/ACDC':>10s}")
+        print(head)
+        print("-" * len(head))
+        n_acdc = c["band"]["acdc"]["n_target"]
+        for r in rows:
+            ratio = (r["band"] / n_acdc if np.isfinite(n_acdc) and n_acdc else np.nan)
+            print(f"{r['method']:10s} {r['band']:10.4g} {r['band_points']:4d} "
+                  f"{r['split_mean']:11.4g} {r['split_se_full']:9.3g} "
+                  f"{str(r['all_splits_usable']):>7s} {r['anchor']:10.4g} "
+                  f"{ratio:10.4g}")
+        out.update({"n_splits": c["n_splits"], "alpha_ref": c["alpha_ref"],
+                    "costs": {r["method"]: _jsonable(r) for r in rows},
+                    "ratios_vs_acdc": {r["method"]: (r["band"] / n_acdc)
+                                       for r in rows if np.isfinite(n_acdc)},
+                    "band_rel_cap": rb.BAND_REL_CAP,
+                    "band_min_blocks": rb.BAND_MIN_BLOCKS})
     if write:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         path = OUT_DIR / f"{dataset}_summary.json"
@@ -562,12 +698,14 @@ def main(argv=None):
     ap.add_argument("--n-boot", type=int, default=100)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--no-write", action="store_true")
+    ap.add_argument("--no-costs", action="store_true",
+                    help="'all' stops after the gate (no cost ladders)")
     args = ap.parse_args(argv)
     ds = args.dataset
 
     if args.stage == "all":
         run_all(ds, n_splits=args.n_splits, n_boot=args.n_boot, seed=args.seed,
-                write=not args.no_write)
+                write=not args.no_write, with_costs=not args.no_costs)
     elif args.stage == "inputs":
         inp = inputs(ds)
         print(json.dumps({"dataset": ds, "sweep": str(inp["paths"]["sweep_npz"]),
