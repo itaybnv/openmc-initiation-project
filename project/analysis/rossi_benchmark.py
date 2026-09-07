@@ -1829,6 +1829,384 @@ def doubles_count_vs_gap(gaps, label: str = "090", n_subset: int = N_SOURCE_BF) 
     return pd.DataFrame(rows)
 
 
+# --------------------------------------------------------------------------- #
+# Band intercept estimator (ADDITIVE; the single-anchor histories_to_target above
+# is untouched and stays the comparison baseline).
+#
+# WHY. histories_to_target slides ONE ladder point -- the largest budget with >=6
+# convergent blocks -- down the N^-1/2 law. A std from 10 blocks has a 24% relative
+# SE, so N ~ sigma^2 inherits +/-47% (1 sigma) on every published N->5% number, and
+# a one-lag window shift moves it by up to 23% (LAG_AXIS_FIX_REPORT sections 8.1-8.2).
+#
+# WHAT REPLACES IT. A fixed-slope (-1/2) weighted fit of the LEVEL over a BAND of
+# budgets that is both
+#   * asymptotic  -- sigma <= rel_cap*|alpha_ref| (pre-asymptotic budgets bias
+#     sigma high: the nonlinear alpha fits / few-pair MLEs have not converged), and
+#   * well populated -- n_convergent >= min_blocks (so each sigma is itself precise;
+#     SE(log sigma) = 1/sqrt(2(n_conv-1))).
+# The anchor rule's own docstring argues for the HIGH-budget end because the low
+# end is biased; rel_cap makes that argument quantitative and then keeps every
+# remaining point instead of throwing 8 of 9 away.
+#
+# UNCERTAINTY. The formal 1/sqrt(sum w) of the weighted mean is OPTIMISTIC: ladder
+# points are nested subsets of the SAME histories, so their sigma estimates are
+# positively correlated and the effective number of independent points is smaller
+# than n_points. The honest error is the SPLIT-SAMPLE spread (split_sample_costs):
+# disjoint parent-id partitions are independent by construction, so the scatter of
+# the per-split band estimates measures the estimator's real reproducibility.
+# --------------------------------------------------------------------------- #
+
+BAND_REL_CAP = 0.25      # sigma/|alpha_ref| above this is not yet asymptotic
+BAND_MIN_BLOCKS = 20     # <= 20 blocks -> SE(log sigma) > 16%, too thin to weight on
+BAND_MIN_POINTS = 3      # fewer than this and the band is not a fit
+
+
+def _band_rows(budget_df: pd.DataFrame, alpha_ref: float, rel_cap: float,
+               min_blocks: int) -> pd.DataFrame:
+    """Rows of a sigma_vs_budget frame inside the asymptotic + populated band."""
+    d = budget_df.dropna(subset=["sigma"])
+    d = d[np.isfinite(d["sigma"]) & (d["sigma"] > 0)]
+    if "censored" in d:
+        d = d[~d["censored"]]
+    d = d[d["sigma"] <= rel_cap * abs(alpha_ref)]
+    if "n_convergent" in d:
+        d = d[d["n_convergent"] >= min_blocks]
+    return d.sort_values("n_prime")
+
+
+def fit_intercept_band(budget_df: pd.DataFrame, alpha_ref: float,
+                       target: float = 0.05, slope: float = -0.5,
+                       rel_cap: float = BAND_REL_CAP,
+                       min_blocks: int = BAND_MIN_BLOCKS) -> dict:
+    """Histories to sigma_alpha = target*|alpha_ref| from a BAND of ladder points.
+
+    Fixed-slope weighted fit in log space. With sigma = C N^slope, every band point
+    gives log C_i = log sigma_i - slope*log N_i; the weights are the inverse
+    variances of log sigma_i, w_i = 2*(n_convergent_i - 1) (a sample std from n iid
+    realizations has SE(s)/s = 1/sqrt(2(n-1))). Then
+
+        log C = sum(w_i log C_i) / sum(w_i),   N_target = (C / sigma_target)^(-1/slope)
+
+    with sigma_target = target*|alpha_ref|.
+
+    log_se_formal = 1/sqrt(sum w) is the weighted-mean SE. It is reported LABELLED
+    'formal, optimistic': the ladder budgets are nested subsets of one dataset, so
+    their sigma's are correlated and this understates the true spread. Use
+    split_sample_costs for the honest error bar.
+
+    A FREE-slope weighted fit over the same rows is returned as a diagnostic
+    (slope_free +/- slope_free_se, its own n_target_free); slope_ok tests
+    |slope_free + 0.5| < 3*slope_free_se, i.e. consistency with the CLT law that
+    the fixed-slope estimator assumes.
+
+    Guard: fewer than BAND_MIN_POINTS qualifying rows -> retry with min_blocks=10
+    (relaxed=True in the result); still too few -> ok=False, n_target=nan (genuine
+    starvation, same contract as histories_to_target).
+    """
+    rel = abs(float(alpha_ref))
+    sigma_target = float(target) * rel
+    relaxed = False
+    min_blocks_used = int(min_blocks)
+    d = _band_rows(budget_df, alpha_ref, rel_cap, min_blocks_used)
+    if len(d) < BAND_MIN_POINTS and min_blocks_used > 10:
+        relaxed, min_blocks_used = True, 10
+        d = _band_rows(budget_df, alpha_ref, rel_cap, min_blocks_used)
+    base = {"ok": False, "n_target": np.nan, "log_c": np.nan,
+            "log_se_formal": np.nan, "n_target_rel_se_formal": np.nan,
+            "n_points": int(len(d)), "n_min": np.nan, "n_max": np.nan,
+            "slope_fixed": float(slope), "slope_free": np.nan,
+            "slope_free_se": np.nan, "n_target_free": np.nan, "slope_ok": False,
+            "rel_cap": float(rel_cap), "min_blocks": min_blocks_used,
+            "relaxed": relaxed, "sigma_target": sigma_target, "rows": d,
+            "extrapolated": False}
+    if len(d) < BAND_MIN_POINTS:
+        return base
+
+    x = np.log(d["n_prime"].to_numpy(float))
+    y = np.log(d["sigma"].to_numpy(float))
+    w = 2.0 * (d["n_convergent"].to_numpy(float) - 1.0)
+
+    # --- fixed slope: weighted mean of the per-point intercepts ---------------
+    log_c = float(np.sum(w * (y - slope * x)) / np.sum(w))
+    log_se = float(1.0 / np.sqrt(np.sum(w)))
+    n_target = float(np.exp((log_c - np.log(sigma_target)) / (-slope)))
+
+    # --- free slope: weighted least squares (same rows, same weights) ---------
+    Sw, Swx, Swy = w.sum(), (w * x).sum(), (w * y).sum()
+    Swxx, Swxy = (w * x * x).sum(), (w * x * y).sum()
+    det = Sw * Swxx - Swx ** 2
+    if det > 0:
+        b = float((Sw * Swxy - Swx * Swy) / det)
+        a = float((Swxx * Swy - Swx * Swxy) / det)
+        b_se = float(np.sqrt(Sw / det))
+        n_free = (float(np.exp((np.log(sigma_target) - a) / b))
+                  if b < 0 else np.nan)
+        ok_slope = bool(abs(b + 0.5) < 3.0 * b_se)
+    else:
+        b = a = b_se = np.nan
+        n_free, ok_slope = np.nan, False
+
+    base.update({"ok": True, "n_target": n_target, "log_c": log_c,
+                 "log_se_formal": log_se,
+                 "n_target_rel_se_formal": float(log_se / (-slope)),
+                 "n_min": float(d["n_prime"].min()),
+                 "n_max": float(d["n_prime"].max()),
+                 "slope_free": b, "slope_free_se": b_se,
+                 "n_target_free": n_free, "slope_ok": ok_slope,
+                 "extrapolated": bool(n_target > float(d["n_prime"].max()))})
+    return base
+
+
+# --------------------------------------------------------------------------- #
+# Split-sample uncertainty: the honest error bar on a band estimate
+# --------------------------------------------------------------------------- #
+
+def _split_sphere(df: pd.DataFrame, split: int, n_split: int) -> pd.DataFrame:
+    """Rows whose parent_id falls in split's disjoint range, RELABELLED to 1..n_split.
+
+    _disjoint_blocks / oracle_/realistic_/die_block_alphas all assume parent ids run
+    over 1..n_total (their masks are p > b*n' and p <= (b+1)*n'), so the offset must
+    be removed rather than passed through; with the relabelling they work unchanged
+    on a split, with n_total = n_split.
+    """
+    p = df["parent_id"].to_numpy()
+    off = int(split) * int(n_split)
+    m = (p > off) & (p <= off + int(n_split))
+    return pd.DataFrame({"time": df["time"].to_numpy()[m], "parent_id": p[m] - off})
+
+
+def _split_events(events: dict, split: int, n_cell_split: int) -> dict:
+    """Per-cell events in split's disjoint per-cell parent-id range, relabelled to
+    1..n_cell_split (acdc_block_alphas blocks on the same p > b*n' convention)."""
+    off = int(split) * int(n_cell_split)
+    out = {}
+    for idx, (t, p) in events.items():
+        m = (p > off) & (p <= off + int(n_cell_split))
+        out[idx] = (t[m], p[m] - off)
+    return out
+
+
+def flagship_cost_inputs(maxb: int = 500) -> dict:
+    """The k=0.90 flagship data path of make_master_deck.compute_curves, as a dict
+    (loaded ONCE so the full-data and split-sample estimates share it verbatim)."""
+    fl = FLAGSHIP_LABEL
+    win = FIT_WINDOWS[fl]
+    df = load_chain_events_from(FLAGSHIP_DOUBLES_TRACK)
+    n_sphere = int(df["parent_id"].max())
+    events, n_cell = load_sweep_events(FLAGSHIP_SWEEP_EVENTS)
+    n_cells = len(events)
+    F = fission_coarse_from_dir(FLAGSHIP_DOUBLES_DIR, 8, 10)
+    alpha_ref = acdc_alpha_sigma(fl)[0]
+    t, p = df["time"].to_numpy(), df["parent_id"].to_numpy()
+    return {"label": fl, "fit_window": win, "df": df, "n_sphere": n_sphere,
+            "events": events, "n_cell": n_cell, "n_cells": n_cells,
+            "n_sweep_total": n_cell * n_cells, "F": F,
+            "alpha_ref": float(alpha_ref), "maxb": int(maxb),
+            "w0_oracle": flat_background_weight(same_parent_pair_dts(t, p, win[1]), *win),
+            "w0_die": flat_background_weight(t, *win)}
+
+
+def cost_curves(inputs: dict, methods=("oracle", "realistic", "die", "acdc"),
+                df=None, n_sphere=None, events=None, n_cell=None,
+                acdc_block_fn=None) -> dict:
+    """sigma_vs_budget for the requested methods on (a split of) a cost-inputs dict.
+
+    Mirrors make_master_deck.compute_curves exactly: same block functions, same
+    max_blocks, the SAME frozen full-dataset w0_oracle / w0_die, realistic at rng=1.
+    df/n_sphere/events/n_cell override the full dataset (used for splits);
+    acdc_block_fn overrides acdc_block_alphas (used for the k=0.98 extended grid).
+    """
+    win, maxb = inputs["fit_window"], inputs["maxb"]
+    df = inputs["df"] if df is None else df
+    n_sphere = inputs["n_sphere"] if n_sphere is None else int(n_sphere)
+    events = inputs["events"] if events is None else events
+    n_cell = inputs["n_cell"] if n_cell is None else int(n_cell)
+    n_cells, F = inputs["n_cells"], inputs["F"]
+    n_sweep = n_cell * n_cells
+    acdc_fn = acdc_block_alphas if acdc_block_fn is None else acdc_block_fn
+    bud_sp, bud_sw = budget_ladder(n_sphere), budget_ladder(n_sweep)
+    out = {}
+    if "oracle" in methods:
+        out["oracle"] = sigma_vs_budget(
+            lambda n: oracle_block_alphas(df, n, n_sphere, win, max_blocks=maxb,
+                                          w_fixed=inputs["w0_oracle"]),
+            bud_sp, n_sphere)
+    if "realistic" in methods:
+        out["realistic"] = sigma_vs_budget(
+            lambda n: realistic_block_alphas(df, n, n_sphere, win, rng=1,
+                                             max_blocks=maxb),
+            bud_sp, n_sphere)
+    if "die" in methods:
+        out["die"] = sigma_vs_budget(
+            lambda n: die_block_alphas(df, n, n_sphere, win, max_blocks=maxb,
+                                       w_fixed=inputs["w0_die"]),
+            bud_sp, n_sphere)
+    if "acdc" in methods:
+        out["acdc"] = sigma_vs_budget(
+            lambda n: acdc_fn(events, F, n, n_cell, win, n_cells=n_cells,
+                              max_blocks=maxb),
+            bud_sw, n_sweep)
+    return out
+
+
+def split_sample_costs(inputs, n_splits: int,
+                       methods=("oracle", "realistic", "die", "acdc"),
+                       target: float = 0.05, slope: float = -0.5,
+                       rel_cap: float = BAND_REL_CAP,
+                       min_blocks: int = BAND_MIN_BLOCKS,
+                       acdc_block_fn=None, verbose: bool = True) -> pd.DataFrame:
+    """Band N_target on n_splits DISJOINT sub-datasets -> the honest error bar.
+
+    The sphere record is partitioned into n_splits disjoint parent-id ranges of
+    size n_sphere // n_splits and the sweep events into n_splits disjoint PER-CELL
+    parent-id ranges of size n_cell // n_splits, each relabelled to 1..n so the
+    audited block machinery applies unchanged (see _split_sphere/_split_events).
+    Every split then runs the production path verbatim -- budget_ladder on its own
+    total, sigma_vs_budget with the same block functions and max_blocks, the SAME
+    frozen full-dataset w0_oracle/w0_die, realistic at rng=1 -- and is reduced by
+    fit_intercept_band with the SAME alpha_ref as the full-data estimate.
+
+    Splits are independent by construction, so the scatter of their N_target is a
+    real (correlation-free) uncertainty, unlike the formal weighted-fit SE. Ratios
+    are formed PER SPLIT: the sphere and sweep records are independent datasets, so
+    pairing split s of one with split s of the other is legitimate and the ratio
+    scatter needs no covariance term.
+
+    inputs: a cost-inputs dict (flagship_cost_inputs) or the string "090"/None for
+    the flagship. Returns one row per split: n_target_<method>, n_points_<method>,
+    slope_free_<method>, ok_<method>, plus ratio_oracle_acdc / ratio_realistic_acdc
+    / ratio_die_acdc.
+    """
+    if inputs is None or isinstance(inputs, str):
+        if inputs not in (None, FLAGSHIP_LABEL):
+            raise ValueError(f"only the flagship label {FLAGSHIP_LABEL!r} is built in; "
+                             "pass a cost-inputs dict for anything else")
+        inputs = flagship_cost_inputs()
+    aref = inputs["alpha_ref"]
+    n_sp_split = int(inputs["n_sphere"]) // int(n_splits)
+    n_cell_split = int(inputs["n_cell"]) // int(n_splits)
+    rows = []
+    for s in range(int(n_splits)):
+        df_s = _split_sphere(inputs["df"], s, n_sp_split)
+        ev_s = _split_events(inputs["events"], s, n_cell_split)
+        curves = cost_curves(inputs, methods, df=df_s, n_sphere=n_sp_split,
+                             events=ev_s, n_cell=n_cell_split,
+                             acdc_block_fn=acdc_block_fn)
+        row = {"split": s, "n_sphere_split": n_sp_split,
+               "n_sweep_split": n_cell_split * inputs["n_cells"]}
+        for m in methods:
+            b = fit_intercept_band(curves[m], aref, target, slope, rel_cap, min_blocks)
+            row[f"n_target_{m}"] = b["n_target"]
+            row[f"n_points_{m}"] = b["n_points"]
+            row[f"slope_free_{m}"] = b["slope_free"]
+            row[f"relaxed_{m}"] = b["relaxed"]
+            row[f"ok_{m}"] = b["ok"]
+            # the incumbent single-anchor rule on the SAME split, so the two
+            # estimators' reproducibility can be compared on identical data
+            a = histories_to_target(curves[m], aref, target)
+            row[f"anchor_{m}"] = a["n_target"] if a["ok"] else np.nan
+        if "acdc" in methods and np.isfinite(row.get("n_target_acdc", np.nan)):
+            for m in ("oracle", "realistic", "die"):
+                if m in methods:
+                    row[f"ratio_{m}_acdc"] = row[f"n_target_{m}"] / row["n_target_acdc"]
+        rows.append(row)
+        if verbose:
+            got = " ".join(f"{m}={row[f'n_target_{m}']:.3g}({row[f'n_points_{m}']})"
+                           for m in methods)
+            print(f"  split {s + 1}/{n_splits}: {got}")
+    return pd.DataFrame(rows)
+
+
+def split_cost_summary(split_df: pd.DataFrame, n_splits: int | None = None,
+                       full: dict | None = None) -> pd.DataFrame:
+    """Reduce split_sample_costs to mean / single-split SE / full-data SE.
+
+    se_single = std over splits  -- the reproducibility of ONE split-sized estimate.
+    se_full   = std / sqrt(n)    -- the SE of the mean, quoted as the error bar on
+                the FULL-data estimate. That transfer ASSUMES sqrt(N) consistency:
+                the full record is n_splits times bigger, so its estimator variance
+                is smaller by the same factor only if the estimator is
+                root-N-consistent (which the fixed -1/2 law asserts and the
+                free-slope diagnostic tests). It is an assumption, not a measurement.
+    n_sigma_vs_full (when `full` = {quantity: full-data value} is supplied) is the
+    consistency check |mean - full| / se_full.
+    """
+    cols = [c for c in split_df.columns
+            if c.startswith("n_target_") or c.startswith("ratio_")
+            or c.startswith("anchor_")]
+    n = int(n_splits) if n_splits else len(split_df)
+    rows = []
+    for c in cols:
+        v = split_df[c].to_numpy(float)
+        v = v[np.isfinite(v)]
+        mean = float(np.mean(v)) if len(v) else np.nan
+        sd = float(np.std(v, ddof=1)) if len(v) > 1 else np.nan
+        rec = {"quantity": c, "n_splits_used": int(len(v)), "mean": mean,
+               "se_single": sd,
+               "se_full": sd / np.sqrt(n) if np.isfinite(sd) else np.nan,
+               "rel_se_full": (sd / np.sqrt(n) / mean
+                               if np.isfinite(sd) and mean else np.nan)}
+        if full is not None and c in full and np.isfinite(full[c]):
+            se = rec["se_full"]
+            rec["full"] = float(full[c])
+            rec["n_sigma_vs_full"] = (abs(mean - full[c]) / se
+                                      if np.isfinite(se) and se > 0 else np.nan)
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def cost_summary_flagship(n_splits_list=(10, 4), target: float = 0.05,
+                          slope: float = -0.5, rel_cap: float = BAND_REL_CAP,
+                          min_blocks: int = BAND_MIN_BLOCKS, maxb: int = 500,
+                          methods=("oracle", "realistic", "die", "acdc"),
+                          verbose: bool = True) -> dict:
+    """Full-data band estimate + old anchor + split-sample errors, k=0.90 flagship.
+
+    Data path = make_master_deck.compute_curves verbatim (FLAGSHIP_* constants,
+    load_chain_events_from / load_sweep_events / fission_coarse_from_dir(...,8,10),
+    alpha_ref = acdc_alpha_sigma(FLAGSHIP_LABEL)[0]).
+
+    For every n_splits in n_splits_list the split-sample table is computed; the
+    FINEST split count in which EVERY split yields >= BAND_MIN_POINTS band points
+    for a method is the one whose SE is quoted for that method (coarser splits are
+    kept in the result for inspection). Returns
+    {inputs, alpha_ref, curves, band, anchor, splits, summaries, chosen}.
+    """
+    inputs = flagship_cost_inputs(maxb=maxb)
+    aref = inputs["alpha_ref"]
+    if verbose:
+        print(f"[flagship] alpha_ref = {aref:.2f}  n_sphere = {inputs['n_sphere']:,}  "
+              f"n_sweep = {inputs['n_sweep_total']:,}")
+    curves = cost_curves(inputs, methods)
+    band = {m: fit_intercept_band(curves[m], aref, target, slope, rel_cap, min_blocks)
+            for m in methods}
+    anchor = {m: histories_to_target(curves[m], aref, target) for m in methods}
+    splits, summaries = {}, {}
+    for ns in n_splits_list:
+        if verbose:
+            print(f"[flagship] split-sample, {ns} splits")
+        tab = split_sample_costs(inputs, ns, methods, target, slope, rel_cap,
+                                 min_blocks, verbose=verbose)
+        splits[ns] = tab
+        full = {f"n_target_{m}": band[m]["n_target"] for m in methods}
+        full.update({f"anchor_{m}": anchor[m]["n_target"] for m in methods})
+        if "acdc" in methods and np.isfinite(band["acdc"]["n_target"]):
+            for m in ("oracle", "realistic", "die"):
+                if m in methods:
+                    full[f"ratio_{m}_acdc"] = (band[m]["n_target"]
+                                               / band["acdc"]["n_target"])
+        summaries[ns] = split_cost_summary(tab, ns, full)
+    chosen = {}
+    for m in methods:
+        good = [ns for ns in n_splits_list
+                if (splits[ns][f"n_points_{m}"] >= BAND_MIN_POINTS).all()
+                and splits[ns][f"ok_{m}"].all()]
+        chosen[m] = max(good) if good else None
+    return {"inputs": inputs, "alpha_ref": aref, "curves": curves, "band": band,
+            "anchor": anchor, "splits": splits, "summaries": summaries,
+            "chosen": chosen, "target": target}
+
+
 if __name__ == "__main__":
     import sys
     if "--fit-windows" in sys.argv:
