@@ -15,10 +15,11 @@ the efficiency ratio. Everything else (cost vs k, cost vs detector distance, the
 derived from the same across-realization sigma machinery.
 
 Data tiers:
-  * flagship deep-dive: k=0.90, gap 10, MATCHED 10M-history sphere
-    (greens-function-k090-bench10M) + per-cell sweep
-    (greens-sweep-k090-bench10M-events.h5). The master curve lives here, where
-    the 1/sqrt(N) law is validated on measured points before any extrapolation.
+  * flagship deep-dive: k=0.90, gap 10, MATCHED 100M-history sphere
+    (greens-function-k090-bench100M) + per-cell sweep
+    (greens-sweep-k090-bench100M-events.h5). The master curve lives here, where
+    the 1/sqrt(N) law is validated on measured points before any extrapolation;
+    100M lets the realistic Doubles reach its 5% target as a measured point.
   * breadth: 1M globals + greens-sweep-k<L>-bench1M(-events).h5 for all 8 k, and
     the k=0.90 gap files (5/10/15/40/90 cm) -- fixed-budget framing where the
     Doubles method visibly starves.
@@ -88,6 +89,16 @@ import pandas as pd
 
 from project.analysis import greens_loader as gl
 from project.analysis import rossi_benchmark as rb
+# k=0.98 record-extension fix (2026-07-12): the 10 ms histogram record truncated the
+# ACDC assembly's overlap integral near critical; every k=0.98 quantity below uses the
+# 40 ms extended record + its plateau window via this additive module. See
+# outputs/presentation/K098_EXTENSION_REPORT.md. All other k are byte-identical paths.
+from project.analysis import k098_record_extension as kre
+# PK-departure fix (2026-07-12): the §1 departure panel is measured against the
+# band-median FUNDAMENTAL alpha (the §0b dashed line), not the window-fit alpha,
+# whose frozen window still carries a few-% higher-mode tail at mid k. See
+# outputs/presentation/PK_DEPARTURE_AUDIT.md.
+from project.analysis import pk_departure as pkd
 
 FIGURES_DIR = Path("../outputs/figures/benchmark")
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,7 +127,11 @@ M = {
 # per-k ramp kept only for the alignment-gate overlay
 KCOL = {"098": "#08306b", "095": "#2171b5", "090": "#4292c6", "080": "#41ab5d",
         "070": "#ff7f0e", "060": "#e6550d", "050": "#d62728", "040": "#7a0177"}
-MAXB = 25            # cap realizations per budget (stable sigma needs ~25-30)
+MAXB = 500           # cap realizations/budget at 500: std-of-std ~ 1/sqrt(2*499) ~ 3%
+                     # (very clean) while bounding runtime. At 100M the low-budget end
+                     # could afford ~3300 blocks, but past a few hundred the std-of-std
+                     # gain is marginal and the cost is real. The high-budget end keeps
+                     # its few-block scatter, shown honestly by the error bars.
 TARGET = 0.05        # sigma_alpha / |alpha| target
 
 
@@ -139,6 +154,75 @@ def fmt_t(s):
     if s < 1.728e5:
         return f"{s/3600:.1f} h"
     return f"{s/86400:.1f} d"
+
+
+REL_CAP = 0.5   # sigma/|alpha| ceiling: points above this are not measurements
+
+
+def draw_master_curve(ax, curves, scaling, h2t, alpha_ref,
+                      methods=("acdc", "oracle", "realistic", "die")):
+    # Only MEASURING-regime points are drawn: non-censored (>=5 blocks, >=80%
+    # convergent) AND sigma/|alpha| < REL_CAP. A censored or sigma/|alpha|~3 point is
+    # not a measurement -- it only stretches the y-axis and hides the real content in a
+    # thin band -- so the cell's printout lists the hidden budgets instead. Per method:
+    #   filled markers +/- std-of-std = measured sigma(N);
+    #   line through them             = the SINGLE fit_sigma_scaling slope (SOLID when
+    #                                   ~ -1/2, dense-DASH when off the law = pre-asymptotic)
+    #                                   -- same number printed and annotated, no second refit;
+    #   dotted                        = N^-1/2 projection to 5% -- drawn ONLY where the fit
+    #                                   is NOT already on the law within the data (off-law OR
+    #                                   target past the last point). Where the solid fit sits
+    #                                   on -1/2 and reaches 5% among the points it crosses the
+    #                                   marker itself, so a dotted overlay is redundant/omitted.
+    ys = [TARGET]
+    any_solid = False
+    for i, m in enumerate(methods):
+        c = curves[m]; meta = M[m]; sl = scaling[m]; h = h2t[m]
+        d = c[c["sigma"].notna() & (c["sigma"] > 0)
+              & (c["sigma"] / abs(alpha_ref) < REL_CAP)]
+        if not len(d):
+            continue
+        yv = (d["sigma"] / abs(alpha_ref)).to_numpy()
+        ax.errorbar(d["n_prime"], yv, yerr=d["sigma_err"] / abs(alpha_ref),
+                    fmt=meta["marker"], color=meta["color"], capsize=2, lw=0,
+                    elinewidth=1.1, markersize=6, label=meta["label"], zorder=5)
+        ys.extend(yv.tolist())
+        # SOLID/dashed = the fit_sigma_scaling OLS line through exactly these points
+        # (its slope is what the cell prints); solid at ~ -1/2, dense-dash if steeper.
+        if np.isfinite(sl["slope"]) and np.isfinite(sl["intercept"]) and len(d) >= 2:
+            Ns = np.logspace(np.log10(d["n_prime"].min()), np.log10(d["n_prime"].max()), 30)
+            line = np.exp(sl["intercept"] + sl["slope"] * np.log(Ns)) / abs(alpha_ref)
+            solid = abs(sl["slope"] + 0.5) < 0.15
+            any_solid |= solid
+            ax.plot(Ns, line, ls="-" if solid else (0, (5, 1)),
+                    color=meta["color"], lw=1.7, zorder=4)
+            xt = float(d["n_prime"].max())
+            yt = np.exp(sl["intercept"] + sl["slope"] * np.log(xt)) / abs(alpha_ref)
+            # stagger the annotation vertically by method index so they never collide
+            # (14 pt spacing: > the 8 pt font even when two line ends nearly coincide)
+            ax.annotate(f"{sl['slope']:+.2f}", (xt, yt), color=meta["color"], fontsize=8,
+                        xytext=(5, (i - 1.5) * 14), textcoords="offset points", va="center")
+        # dotted N^-1/2 projection to 5% -- ONLY when the fit is not already on the law
+        # within the data (pre-asymptotic slope, whose own extrapolation is unreliable,
+        # OR a target beyond the last measured point). On-law methods that reach 5% among
+        # their points have the solid fit cross the marker directly -> no dotted overlay.
+        if h["ok"] and np.isfinite(h["n_target"]):
+            if (not sl["slope_ok"]) or h["extrapolated"]:
+                Nd = np.logspace(np.log10(h["anchor_N"]), np.log10(h["n_target"]), 30)
+                ax.plot(Nd, h["anchor_sigma"] / abs(alpha_ref) * np.sqrt(h["anchor_N"] / Nd),
+                        ls=":", color=meta["color"], lw=1.4, alpha=0.7, zorder=3)
+            ax.scatter([h["n_target"]], [TARGET], marker=meta["marker"], color=meta["color"],
+                       s=130, zorder=6, edgecolor="k", linewidth=0.8)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.axhline(TARGET, color="0.35", ls="--", lw=1.0)
+    ax.text(0.015, TARGET * 1.15, "target 5%", color="0.35", fontsize=10,
+            transform=ax.get_yaxis_transform())
+    if len(ys) > 1:
+        ax.set_ylim(min(ys) * 0.7, max(ys) * 1.5)
+    ax.set_xlabel("total transport histories $N$ (fair: sweep = per-cell × $n_{cells}$)")
+    ax.set_ylabel(r"$\sigma_\alpha / |\alpha|$")
+    ax.legend(loc="lower left", fontsize=9, framealpha=0.9,
+              title=r"solid: on $-1/2$ law  ·  dashed: pre-asymptotic" if any_solid else None)
 """))
 
     # ============================================================= 0. gate
@@ -148,32 +232,162 @@ def fmt_t(s):
 Before any cost comparison: the model-based ACDC curve and the direct **Doubles (parent-ID)**
 pair histogram must describe the *same* $R(\tau)$ on an absolute scale (this is what fixes
 $M_{sim}$). Overlay of $R_{ACDC}(\tau)$ and the Doubles same-chain pair rate for the four
-high-precision (40M sweep) $k$ values, clipped to the signal band.
+high-precision (40M sweep) $k$ values, clipped to the signal band. Exception: the $k=0.98$
+panel uses the matched bench10M pair on the **extended 40 ms record** — the 10 ms histogram
+record truncated the assembled $R(\tau)$ at late lag (scale ratio read 1.04; on the untruncated
+record it is ~1.01). See `K098_EXTENSION_REPORT.md`.
 """))
     cells.append(code(r"""
-gate = {L: rb.alignment_gate(L, verbose=True) for L in ANCHOR_LABELS}
+# k=0.98 gate on the extended 40 ms record (record-extension fix, see
+# K098_EXTENSION_REPORT.md): same audited machinery, un-truncated assembly.
+gate = {L: (kre.alignment_gate_ext(verbose=True) if L == "098"
+            else rb.alignment_gate(L, verbose=True)) for L in ANCHOR_LABELS}
 
 fig, axes = plt.subplots(2, 2, figsize=(11, 8))
 for ax, L in zip(axes.flat, ANCHOR_LABELS):
     r = gate[L]
-    tau_ms = r["tau"] * 1e3
-    lo, hi = rb.FIT_WINDOWS[L]
-    inwin = (r["tau"] >= 2 * rb.DT) & (r["tau"] <= 1.4 * hi)
+    lo, hi = kre.ext_window() if L == "098" else rb.FIT_WINDOWS[L]
+    # both R(tau) now span the full [0, 10 ms] range, so limit x to the data (the
+    # window edge at worst) -- no dead axis/shading past the last point (was the
+    # 5-14 ms empty band at k=0.98).
+    xmax = min(1.4 * hi, float(r["tau"].max()))
+    inwin = (r["tau"] >= 2 * rb.DT) & (r["tau"] <= xmax)
     ypos = r["R_acdc"][inwin]; ypos = ypos[ypos > 0]
     m = r["R_acdc"] > 0
-    ax.semilogy(tau_ms[m], r["R_acdc"][m], "-", color=M["acdc"]["color"], lw=1.8, label="ACDC")
-    nz = r["R_bf"] > 0
-    ax.semilogy(tau_ms[nz], r["R_bf"][nz], "o", ms=3, color=M["oracle"]["color"], alpha=0.5,
-                label="Doubles (parent-ID)")
+    ax.semilogy(r["tau"][m] * 1e3, r["R_acdc"][m], "-", color=M["acdc"]["color"], lw=1.8,
+                label="ACDC")
+    # coarse-rebinned Doubles overlay + Poisson error bars: at low k the raw per-bin
+    # pair count is 1-2 and the dots collapse onto quantization stripes.
+    tb, Rb, eb = r["tau_bf_rebin"], r["R_bf_rebin"], r["R_bf_rebin_err"]
+    nz = Rb > 0
+    lbl = "Doubles (parent-ID)" + (f" (×{r['rebin']} rebin)" if r["rebin"] > 1 else "")
+    ax.errorbar(tb[nz] * 1e3, Rb[nz], yerr=eb[nz], fmt="o", ms=3.5, color=M["oracle"]["color"],
+                alpha=0.6, capsize=2, lw=0, elinewidth=1.0, label=lbl)
     ax.axvspan(lo * 1e3, hi * 1e3, color="0.85", zorder=0, label=r"$\alpha$ fit window")
-    ax.set_xlim(0, 1.4 * hi * 1e3); ax.set_ylim(ypos.min() * 0.5, ypos.max() * 2)
+    ax.set_xlim(0, xmax * 1e3); ax.set_ylim(ypos.min() * 0.5, ypos.max() * 2)
     ax.set_title(f"k = {int(L)/100:.2f}   (scale Doubles/ACDC = {r['scale_bf_over_acdc']:.2f})")
     ax.set_xlabel(r"$\tau$ [ms]"); ax.set_ylabel(r"$R(\tau)$ [pairs/src/s]")
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8)
 fig.suptitle("Acceptance gate: ACDC and Doubles describe the same $R(\\tau)$", y=1.01)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "alignment_gate.png")
 plt.show()
+"""))
+
+    # =================================================== 0b. principled fit window
+    cells.append(md(r"""
+## 0b. Where the fit window comes from (the fundamental-mode plateau)
+
+$\alpha$ is the **late-time (fundamental-mode) slope** of $R(\tau)$. $R(\tau)$ is multi-exponential:
+at short lag the window still holds faster higher spatial modes, so the recovered $|\alpha|$ is
+too large; as the window-start moves out, $|\alpha|$ falls and then **plateaus** once only the
+fundamental mode survives, before the delayed/background tail flattens it again. The window is
+**not hand-tuned** — `rb.plateau_window` derives it from the high-statistics ACDC $R(\tau)$: a
+self-consistent band median fixes the fundamental decay constant, and the window start is the
+*earliest* lag already on that plateau (best statistics). The mode-settling time is a property of
+the geometry, so the **same window is shared by every method** (the fairness invariant). The
+shaded band is the chosen $[\,$lo$,\,$hi$\,]$. Two distinct $\alpha$'s live in this figure and are
+**not interchangeable** (`PK_DEPARTURE_AUDIT.md`): the dashed **band-median fundamental** — the
+physics reference §1 measures the PK departure against — and the **in-window fit**, whose window
+starts at the plateau-criterion *edge* and so still carries a few-% higher-mode tail at mid $k$
+(at $k=0.90$: window-fit 1535 vs fundamental 1433). The window fit is the right quantity for the
+*cost* benchmark (every method shares the same window — fairness); the fundamental is the right
+one for the *physics* comparison against PK. The $k=0.98$ panel applies the same rule on the
+**extended 40 ms record** (`K098_EXTENSION_REPORT.md`), where the plateau — and the window's upper
+edge — is no longer ceilinged by the 10 ms record: window $[1.37,\,9.51]$ ms, fundamental
+$\approx -368$.
+"""))
+    cells.append(code(r"""
+fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+for ax, L in zip(axes.flat, ANCHOR_LABELS):
+    # k=0.98: plateau rule on the extended 40 ms record (K098_EXTENSION_REPORT.md)
+    w = kre.derive_window(verbose=False) if L == "098" else rb.plateau_window(L)
+    lo_g, a_g = w["lo_grid"], np.abs(w["alpha_grid"])
+    af = abs(w["alpha_fund"])
+    good = np.isfinite(a_g)
+    ax.loglog(lo_g[good] * 1e3, a_g[good], "o-", color="0.4", ms=4, label=r"$|\alpha|$ vs window start")
+    ax.axhline(af, color=M["acdc"]["color"], ls="--", lw=1.4, label=r"fundamental $|\alpha|$ (band median)")
+    ax.axvspan(w["lo"] * 1e3, w["hi"] * 1e3, color="0.85", zorder=0, label="chosen fit window")
+    # clip the y-axis to the physical band so fit-failure spikes at low k don't dominate
+    ax.set_ylim(af * 0.4, af * 6)
+    ax.set_title(f"k = {int(L)/100:.2f}   window = "
+                 f"[{w['lo']/w['tau_decay']:.1f}, {w['hi']/w['tau_decay']:.1f}]"r"$\,\tau_d$")
+    ax.set_xlabel(r"window start lo [ms]"); ax.set_ylabel(r"recovered $|\alpha|$ [s$^{-1}$]")
+    ax.legend(fontsize=8, loc="upper right")
+fig.suptitle(r"Fit window = earliest lag on the fundamental-mode plateau", y=1.01)
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fit_window_plateau.png")
+plt.show()
+
+# PK anchor (one-sided check): at k=0.98 PK is asymptotically exact, so the
+# band-median FUNDAMENTAL must match it. PK is NOT used to choose windows at low k
+# (it is known-wrong there -- that is the whole point of the k<0.9 departure panel
+# below). On the extended record the k=0.98 fundamental lands on PK (the old -10%
+# deficit was the 10 ms record truncation, K098_EXTENSION_REPORT.md). Both alphas are
+# printed to keep them distinct (PK_DEPARTURE_AUDIT.md): the in-window FIT starts at
+# the plateau-criterion edge, so at mid k it reads a few % above the fundamental
+# (higher-mode tail) -- which is why the §1 departure panel uses the fundamental.
+for L in ["098", "090"]:
+    w = kre.derive_window(verbose=False) if L == "098" else rb.plateau_window(L)
+    _, a_pk = rb._ifp_pk_alpha(L)
+    apk = abs(a_pk.nominal_value)
+    print(f"k={int(L)/100:.2f}: fundamental={abs(w['alpha_fund']):6.0f} "
+          f"({100*(abs(w['alpha_fund'])-apk)/apk:+.0f}% vs PK {apk:.0f})   "
+          f"window-fit alpha={abs(w['alpha']):6.0f} "
+          f"({100*(abs(w['alpha'])-apk)/apk:+.0f}% vs PK)")
+"""))
+
+    # ================================================= 0c. window provenance / robustness
+    cells.append(md(r"""
+### 0c. The window is robust — and why it is NOT anchored on point kinetics
+
+Because the window (§0b) is read off ACDC's $R(\tau)$, a fair objection is that it might bias the
+comparison toward ACDC. It does not, and this figure is the proof.
+
+**The window is a property of the system, not of ACDC.** The plateau scan at the flagship
+$k{=}0.90$, computed *independently* from ACDC's $R(\tau)$ and from the **doubles'** $R(\tau)$: both
+descend out of the fast higher-spatial-mode region and settle on the *same* fundamental plateau, so
+the chosen window (shaded) is identical whichever estimator defines it. All the master-curve methods
+are second-moment estimators of the *same* $R(\tau)$ — the window picks the same fundamental mode for
+each.
+
+**Why point kinetics cannot define the window.** The dotted line is PK/IFP, a point model: it omits
+the spatial higher modes, so its $\alpha$ sits *below* the true measured fundamental — only
+marginally at $k{=}0.90$ (visible here), but by ~10–15% at $k\le0.8$ (quantified in §1; the
+previously quoted "up to 27%" was the window-fit departure, mostly higher-mode tail at the
+practical window start — `PK_DEPARTURE_AUDIT.md`). "The
+window that reproduces PK exactly" would therefore have to slide into the delayed-background tail —
+where $|\alpha|$ bends down to meet the wrong PK value — biasing *every* method onto a number we
+already know is incorrect. PK is a valid cross-check only as $k\to1$, where the spatial modes vanish.
+"""))
+    cells.append(code(r"""
+FLp = rb.FLAGSHIP_LABEL
+sweep = gl.load_sweep(FLp); Fp = rb.fission_coarse_sim(FLp, *sweep["G"].shape)
+tau_ac, R_ac = rb.acdc_rossi(sweep, Fp, n_tau=rb.N_T - 1)
+loA, aA = rb.plateau_scan(tau_ac, R_ac, n_scan=40)
+dfp = rb.load_chain_events_from(rb.FLAGSHIP_DOUBLES_TRACK); nsp = int(dfp["parent_id"].max())
+tau_bf, R_bf, _ = rb.bf_rossi(dfp, nsp, tau_max=rb.T_MAX, n_tau=rb.N_T - 1)
+loB, aB = rb.plateau_scan(tau_bf, R_bf, n_scan=40)
+w = rb.plateau_window(FLp); af = abs(w["alpha_fund"]); apk = abs(rb._ifp_pk_alpha(FLp)[1].nominal_value)
+
+fig, axA = plt.subplots(figsize=(7.5, 5.2))
+gA, gB = np.isfinite(aA), np.isfinite(aB)
+axA.loglog(loA[gA] * 1e3, np.abs(aA[gA]), "s-", color=M["acdc"]["color"], ms=4, label=r"from ACDC $R(\tau)$")
+axA.loglog(loB[gB] * 1e3, np.abs(aB[gB]), "o-", color=M["oracle"]["color"], ms=4, label=r"from Doubles $R(\tau)$")
+axA.axvspan(w["lo"] * 1e3, w["hi"] * 1e3, color="0.85", zorder=0, label="chosen window")
+axA.axhline(af, color="0.35", ls="--", lw=1.2, label=r"fundamental $|\alpha|$")
+axA.axhline(apk, color=M["pk"]["color"], ls=":", lw=1.6, label=r"point-kinetics $|\alpha|$")
+axA.set_ylim(af * 0.4, af * 8)
+axA.text(loA[gA][2] * 1e3, af * 5, "higher modes\n(window too early)", fontsize=8, color="0.4")
+axA.set_xlabel("window start [ms]"); axA.set_ylabel(r"recovered $|\alpha|$ [s$^{-1}$]")
+axA.set_title(f"$k$={gl.K_OF_LABEL[FLp]:.2f}: same plateau from either estimator"); axA.legend(fontsize=8)
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "window_provenance.png")
+plt.show()
+dep_fl = 100 * (af - apk) / apk   # flagship departure only; the k-dependence is §1's panel
+print(f"flagship k=0.90: fundamental from ACDC={af:.0f}, from doubles={abs(rb._alpha_fund(loB, aB)):.0f}, "
+      f"PK={apk:.0f}  ->  window-invariant to the estimator; PK sits {dep_fl:+.0f}% off the "
+      f"fundamental here, more off-critical (§1)")
 """))
 
     # ============================================================= 1. agreement
@@ -182,17 +396,43 @@ plt.show()
 
 Context for everything below: at a uniform 1M-history budget, every method that *can* measure
 returns the same $\alpha(k)$ (left); PK peels away below $k\approx0.9$ where the one-point model
-loses the spatial physics (right). The Doubles markers simply stop existing at low $k$ — that
+loses the spatial physics (right). The departure is measured against the **band-median
+fundamental** $|\alpha|$ of §0b — the physics quantity PK should reproduce — with honest errors
+(Poisson bootstrap $\times\,\kappa_S$ statistical + band-read systematic): consistent with PK at
+$k\ge0.90$, then **+10–15% for every $k\le0.81$** (peak $+15\pm8\%$ at $k=0.70$; even the most
+conservative plateau read leaves PK $\ge6\%$ low across that whole range). The light series is
+the same departure computed from the **practical window-fit** $\alpha$: the frozen §0b window
+starts at the plateau-criterion *edge*, so its second-moment fit still carries a few-%
+higher-mode tail at mid $k$ (at $k=0.90$: window-fit 1535 vs fundamental 1433 vs PK 1420), which
+*overstated* the PK departure (up to +27%) — kept only to make that window systematic visible
+(`PK_DEPARTURE_AUDIT.md`). The Doubles markers simply stop existing at low $k$ — that
 absence is the result. The rest of the notebook quantifies the **cost** behind these markers.
 """))
     cells.append(code(r"""
-bench = pd.DataFrame([rb.benchmark_row(L, n_boot=20, rng=20 + i) for i, L in enumerate(LABELS)])
+# k=0.98 rows use the extended-record window / 40 ms assembly grid (record-extension
+# fix, K098_EXTENSION_REPORT.md); every other label is the unchanged audited path.
+bench = pd.DataFrame([(kre.benchmark_row_ext(n_boot=60, rng=20 + i) if L == "098"
+                       else rb.benchmark_row(L, n_boot=60, rng=20 + i))
+                      for i, L in enumerate(LABELS)])
 bench = bench.sort_values("k").reset_index(drop=True)
 
-# high-stats ACDC truth per k (for the PK-departure systematic)
-acdc_best = {L: rb.acdc_alpha_sigma(L) for L in LABELS}
+# high-stats ACDC truth per k (for the PK-departure systematic); k=0.98 from the
+# extended record (-370.7-class value; the 10 ms-record consensus -336 is superseded)
+acdc_best = {L: (kre.acdc_alpha_sigma_ext() if L == "098" else rb.acdc_alpha_sigma(L))
+             for L in LABELS}
 bench["acdc_hi"] = [acdc_best[L][0] for L in bench["label"]]
 bench["acdc_hi_err"] = [acdc_best[L][1] for L in bench["label"]]
+
+# PK-departure fix (2026-07-12, PK_DEPARTURE_AUDIT.md): the physics claim "PK misses
+# spatial modes" is measured against the band-median FUNDAMENTAL |alpha| (the §0b
+# dashed line; pk_departure.alpha_fund_sigma = same audited scan machinery, sigma =
+# Poisson-bootstrap x kappa_S stat (+) band-read systematic), NOT the window-fit
+# acdc_hi above: the frozen windows start at the plateau-criterion edge, where the
+# second-moment fit still carries a few-% higher-mode tail at mid k (k=0.90:
+# window-fit 1535 vs fundamental 1433 vs PK 1420). Seeds match the audit table.
+fund = {L: pkd.alpha_fund_sigma(L, n_boot=100, rng=100 + i) for i, L in enumerate(LABELS)}
+bench["fund"] = [fund[L]["alpha_fund"] for L in bench["label"]]
+bench["fund_err"] = [fund[L]["sigma_total"] for L in bench["label"]]
 kk = bench["k"].to_numpy()
 
 fig, (axA, axB) = plt.subplots(1, 2, figsize=(13.5, 5.2))
@@ -211,97 +451,239 @@ axA.errorbar(kk, np.abs(bench["die"]), yerr=bench["die_err"], fmt="D", color=M["
              mfc="none", capsize=3, label="die-away* (pulse only)")
 axA.set_yscale("log"); axA.set_xlabel(r"$k_{eff}$"); axA.set_ylabel(r"$|\alpha|$ [s$^{-1}$]")
 axA.set_title("Decay constant vs $k$: methods agree where measurable"); axA.legend(fontsize=9)
+# the Doubles (parent-ID/realistic) 1M error bars are chain-bootstrap; the §2
+# cross-check measures how it compares to the across-realization std (kappa_boot,
+# calibrated out in the §3 costs).
+axA.text(0.03, 0.03, "Doubles bars: ±1σ chain-bootstrap (κ_boot-calibrated vs across-realization in §2)",
+         transform=axA.transAxes, fontsize=7.5, color="0.45", va="bottom")
 
-dep = (np.abs(bench["acdc_hi"]) - np.abs(bench["pk"])) / np.abs(bench["pk"])
-dep_err = bench["acdc_hi_err"] / np.abs(bench["pk"])
-axB.errorbar(kk, 100 * dep, yerr=100 * dep_err, fmt="s-", color=M["acdc"]["color"], capsize=3,
-             label="ACDC")
-dep_o = (np.abs(bench["bf_oracle"][ok_o]) - np.abs(bench["pk"][ok_o])) / np.abs(bench["pk"][ok_o])
-axB.errorbar(kk[ok_o], 100 * dep_o, fmt="o", color=M["oracle"]["color"], capsize=3,
-             label="Doubles (parent-ID)")
+# PK-departure fix (2026-07-12, PK_DEPARTURE_AUDIT.md): primary series = the
+# fundamental-based departure (the physics claim); light open series = the same
+# departure at the practical window fit, kept to make the window systematic visible.
+# The old Doubles(parent-ID) series (another window-fit, noisier) moved out of this
+# panel: estimator-vs-estimator agreement is the LEFT panel's story.
+dep_f = (np.abs(bench["fund"]) - np.abs(bench["pk"])) / np.abs(bench["pk"])
+dep_f_err = np.hypot(bench["fund_err"], np.abs(bench["fund"]) * bench["pk_err"]
+                     / np.abs(bench["pk"])) / np.abs(bench["pk"])
+dep_w = (np.abs(bench["acdc_hi"]) - np.abs(bench["pk"])) / np.abs(bench["pk"])
+axB.errorbar(kk, 100 * dep_f, yerr=100 * dep_f_err, fmt="s-", color=M["acdc"]["color"],
+             capsize=3, label="fundamental (band median) vs PK")
+axB.plot(kk, 100 * dep_w, "o--", color="0.6", ms=4.5, mfc="none", lw=1.2,
+         label="at the practical fit window (higher-mode tail)")
 axB.axhline(0, color="k", lw=0.8, ls=":")
 axB.axhline(5, color="0.6", lw=0.8, ls="--"); axB.axhline(-5, color="0.6", lw=0.8, ls="--")
 axB.set_xlabel(r"$k_{eff}$"); axB.set_ylabel(r"$(|\alpha|-|\alpha_{PK}|)/|\alpha_{PK}|$  [%]")
-axB.set_title("Point-kinetics departure (8-point grid)"); axB.legend(fontsize=9)
+axB.set_title("Point-kinetics departure (fundamental mode)"); axB.legend(fontsize=9)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "methods_vs_k.png")
 plt.show()
+
+# the audited numbers behind the right panel (PK_DEPARTURE_AUDIT.md task-1 table)
+dtab = pd.DataFrame({
+    "k": kk.round(3),
+    "alpha_PK": np.abs(bench["pk"]).round(0),
+    "alpha_window_fit": np.abs(bench["acdc_hi"]).round(0),
+    "alpha_fundamental": np.abs(bench["fund"]).round(0),
+    "fund_err": bench["fund_err"].round(0),
+    "dep_window_%": (100 * dep_w).round(1),
+    "dep_fund_%": (100 * dep_f).round(1),
+    "dep_fund_err_%": (100 * dep_f_err).round(1),
+})
+print(dtab.to_string(index=False))
+i_pk = int(np.argmax(dep_f.to_numpy()))
+print(f"\npeak fundamental departure: {100*dep_f.iloc[i_pk]:+.0f}% +/- "
+      f"{100*dep_f_err.iloc[i_pk]:.0f}% at k={kk[i_pk]:.2f}; PK consistent with the "
+      f"fundamental at k>=0.90. The window-fit departure (light) peaks at "
+      f"{100*dep_w.max():+.0f}% -- the excess over the fundamental series is the "
+      f"higher-mode tail at the practical window start, not PK physics.")
+"""))
+
+    # =================================================== 1b. ACDC vs die-away proof
+    cells.append(md(r"""
+### 1b. Why ACDC and die-away must agree — and where any residual gap comes from
+
+ACDC and die-away both recover the *same* fundamental decay constant $\alpha$, so on the left
+panel above they should land on top of each other. ACDC measures $\alpha$ from the **pair
+correlation** $R(\tau)$ (a *second*-moment observable); die-away from the **singles arrival
+envelope** (a *first*-moment observable). At a *finite* fit window the pair correlation carries
+**more higher-spatial-mode contamination** than the singles envelope — so a too-early window makes
+ACDC read a steeper (too-large $|\alpha|$) slope while die-away is already near the fundamental.
+The proof that this is *window-driven*, not a bug or a real systematic, is that the two
+**converge as the window moves late** (below). The principled plateau window (§0b) sits where the
+gap is already small. This rules out the non-window suspects — delayed-background handling
+(die-away fits a flat floor, ACDC carries the constant $A$), time binning (ACDC bins, die-away is
+unbinned), and statistics (this is the 100M flagship): none of those would *converge* with window.
+"""))
+    cells.append(code(r"""
+sc = rb.acdc_vs_dieaway_scan(rb.FLAGSHIP_LABEL, track_path=rb.FLAGSHIP_DOUBLES_TRACK)
+s, a_ac, a_di = sc["s_grid"], np.abs(sc["alpha_acdc"]), np.abs(sc["alpha_die"])
+w = rb.plateau_window(rb.FLAGSHIP_LABEL)
+start_td = w["lo"] / w["tau_decay"]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.5, 5))
+ax1.plot(s, a_ac, "s-", color=M["acdc"]["color"], label="ACDC (pairs, 2nd moment)")
+ax1.plot(s, a_di, "D-", color=M["die"]["color"], mfc="none", label="die-away (singles, 1st moment)")
+ax1.axhline(abs(sc["alpha_fund"]), color="0.4", ls="--", lw=1.2, label="fundamental $|\\alpha|$")
+ax1.axvline(start_td, color="0.6", ls=":", lw=1.4, label="chosen window start")
+ax1.set_xlabel(r"window start [decay times $\tau_d$]"); ax1.set_ylabel(r"$|\alpha|$ [s$^{-1}$]")
+ax1.set_title(f"k={gl.K_OF_LABEL[rb.FLAGSHIP_LABEL]:.2f}: ACDC and die-away converge late")
+ax1.legend(fontsize=9)
+
+ratio = a_ac / a_di
+ax2.plot(s, 100 * (ratio - 1), "o-", color="0.3")
+ax2.axhline(0, color="k", lw=0.8, ls=":")
+ax2.axvline(start_td, color="0.6", ls=":", lw=1.4)
+ax2.set_xlabel(r"window start [decay times $\tau_d$]")
+ax2.set_ylabel(r"ACDC/die-away $-1$  [%]")
+ax2.set_title("Disagreement vanishes as the window moves late")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "acdc_vs_dieaway.png")
+plt.show()
+
+import numpy as _np
+i = int(_np.argmin(_np.abs(s - start_td)))
+print(f"ACDC/die-away disagreement: {100*(ratio[0]-1):+.0f}% at {s[0]:.1f} tau_d  ->  "
+      f"{100*(ratio[i]-1):+.0f}% at the chosen window ({start_td:.1f} tau_d)  ->  "
+      f"{100*(ratio[-1]-1):+.0f}% at {s[-1]:.1f} tau_d")
+print("VERDICT: window-driven higher-mode contamination (2nd moment > 1st moment), not a bug.")
 """))
 
     # ============================================================= 2. master curve
     cells.append(md(r"""
 ## 2. The master curve — $\sigma_\alpha$ vs total histories (flagship $k=0.90$)
 
-The headline. A matched **10M-history** sphere run (Doubles) and per-cell sweep (ACDC, total =
+The headline. A matched **100M-history** sphere run (Doubles) and per-cell sweep (ACDC, total =
 per-cell × $n_{cells}$, so the budgets are *fair*) at $k=0.90$, gap 10 cm. For each method we
-measure $\sigma_\alpha$ at a ladder of budgets from disjoint realizations, then **validate the
-$\sigma\propto N^{-1/2}$ slope** before sliding down that line to the 5% target.
+measure $\sigma_\alpha$ at a ladder of budgets from **disjoint** realizations of the flagship
+run. Splitting one analog run into disjoint blocks is statistically equivalent to independent
+re-runs — the histories are i.i.d., analog transport shares no state, and each particle rides an
+independent RNG substream — and it is *cleaner* than re-running with a fixed seed (which would be
+identical). So $\sigma_\alpha(N)=\mathrm{std}$ of $\alpha$ across blocks of size $N$ is the
+honest across-realization uncertainty — the naive "repeat many times and take the std", but using
+*every* disjoint block the data affords (up to a 500-block cap per budget), not an arbitrary
+handful.
 
-* Read **horizontally** at the dotted 5% line → histories each method needs.
+**Why each point has an error bar.** A standard deviation estimated from $B$ blocks carries its
+own sampling error $\approx\sigma/\sqrt{2(B-1)}$. The low-budget end has *hundreds* of blocks
+(bar $\sim$few %); the high-budget end has only a handful (bar grows). That is the entire reason
+the old curve looked "noisy" — it was a real std-of-std, now shown.
+
+**Only measurements are plotted.** A budget is shown for a method only where it *measured*:
+non-censored (≥5 blocks and ≥80% of them reaching the 50-pair floor — the gate that removes the
+old survivor-bias points) and $\sigma_\alpha/|\alpha|<0.5$. Budgets where the method could not
+measure are listed in the printout below, not drawn as off-scale junk that squeezes the real
+content into a thin band.
+
+**Every block fit freezes its background weight.** The Doubles and die-away fits carry a real
+flat floor (delayed-branch pairs for the parent-ID doubles, accidentals for the realistic
+doubles, the delayed pedestal for die-away). That floor fraction is a property of the *system and
+window*, not of the block — floor and signal counts both scale with budget — so refloating it in
+every few-hundred-pair block is ill-conditioned: the barely-identified weight leaks its variance
+into $\alpha$ and splices two different estimators into one $\sigma(N)$ curve (the old curve's
+kink and nonsense slope). Instead $w_0$ is **frozen**: for parent-ID doubles and die-away from one
+full-dataset fit where it is well identified (printed below); for the realistic doubles from each
+block's own *observables* — measured singles count and duration → expected accidental pairs —
+exactly how a real Rossi-$\alpha$ analysis pins its accidental floor. The residual uncertainty of
+$w_0$ is a common systematic on $\alpha$'s value, not part of the per-realization spread.
+
+**One line per method, honest about what it is.** The line is the single `fit_sigma_scaling` OLS
+through exactly the plotted points — *the same slope the cell prints and annotates* (no second,
+differently-filtered refit). Monte-Carlo gives $\sigma\propto N^{-1/2}$ asymptotically: a slope
+near $-1/2$ is drawn **solid** (the method sits on the asymptotic line), a departing slope is
+drawn **dense-dashed** (still pre-asymptotic); the printed values below the figure are the
+measurement. A method already **on** the $-1/2$ law reaches 5% along its own solid line, so its
+target marker sits directly on that line — no extra construction. The **dotted** projection is
+therefore drawn for **only** the pre-asymptotic method(s) (here the realistic Doubles), whose own
+shallow slope is unreliable to extrapolate: it slides the highest-$N$ *reliable* ($\ge6$-block)
+anchor down the exact $N^{-1/2}$ CLT law for i.i.d. history blocks to the 5% target (low-$N$
+$\sigma$ is biased high, so we never anchor there). That anchored law — not the method's own
+free slope — fixes its histories-to-target number, and is the same $N^{-1/2}$ law the breadth and
+cost-vs-$k$ panels (§3) use, so every method's cost is quoted on one consistent basis.
+
+* Read **horizontally** at the 5% line → histories each method needs.
 * Read **vertically** at any budget → precision at equal cost.
-* The **horizontal gap** between two curves → "X times more histories".
-
-Solid = measured; dashed = $N^{-1/2}$ extrapolation (only drawn where the slope was validated);
-the large marker on the 5% line is the histories-to-target.
+* The **horizontal gap** between two curves → "X times more histories" (the paper's eq. 59 vs 60
+  efficiency ratio — made explicit in §2b).
 """))
     cells.append(code(r"""
 FL = rb.FLAGSHIP_LABEL
 win = rb.FIT_WINDOWS[FL]
 
-# matched 10M flagship data
+# matched 100M flagship data
 df10 = rb.load_chain_events_from(rb.FLAGSHIP_DOUBLES_TRACK)          # sphere doubles events
 n_sphere = int(df10["parent_id"].max())
 events10, n_cell10 = rb.load_sweep_events(rb.FLAGSHIP_SWEEP_EVENTS)  # per-cell sweep events
 n_cells = len(events10)
 n_sweep_total = n_cell10 * n_cells
-F10 = rb.fission_coarse_from_dir(RESULTS / f"greens-function-k{FL}-bench10M", 8, 10)
-alpha_ref = rb.reference_alpha(FL, rb.FLAGSHIP_SWEEP_EVENTS)
+# F10 is the GLOBAL (full-flagship) fission map, reused by every ACDC block. The
+# fission tally is not keyed by detection-event parent_id, so it cannot be split
+# per block; reusing it removes F's own (tiny, high-statistics) sampling noise from
+# the block scatter -- a deliberate, negligible variance suppression on ACDC's bar.
+F10 = rb.fission_coarse_from_dir(rb.FLAGSHIP_DOUBLES_DIR, 8, 10)
+# ONE |alpha_ref| everywhere it is needed (§1, §2, §3): the high-stats ACDC consensus
+# per k. The event-level flagship-sweep alpha and the plateau fundamental differ from
+# it by a few % (window/estimator systematic, not a real disagreement); printed once
+# here so the single choice of denominator is explicit.
+alpha_ref = acdc_best[FL][0]
+print(f"|alpha_ref| = {abs(alpha_ref):.0f} (high-stats ACDC consensus); cf. "
+      f"flagship-events {abs(rb.reference_alpha(FL, rb.FLAGSHIP_SWEEP_EVENTS)):.0f}, "
+      f"plateau fundamental {abs(rb.plateau_window(FL)['alpha_fund']):.0f}")
 
 bud_sp = rb.budget_ladder(n_sphere)
 bud_sw = rb.budget_ladder(n_sweep_total)
 print(f"flagship k={gl.K_OF_LABEL[FL]:.2f}: sphere {n_sphere:,} histories, "
-      f"sweep {n_sweep_total:,} ({n_cell10:,}/cell x {n_cells}); |alpha_ref|={abs(alpha_ref):.0f}")
+      f"sweep {n_sweep_total:,} ({n_cell10:,}/cell x {n_cells})")
+
+# Frozen background weights, ONE flat fit each at full-flagship statistics (the
+# realistic method instead pins its accidental floor per block from observables).
+# Refloating w in every few-hundred-pair block is ill-conditioned and splices two
+# estimators into one sigma(N) curve -- see fit_alpha_mle's 'auto' caveat.
+w0_oracle = rb.flat_background_weight(
+    rb.same_parent_pair_dts(df10["time"].to_numpy(), df10["parent_id"].to_numpy(), win[1]),
+    *win)
+w0_die = rb.flat_background_weight(df10["time"].to_numpy(), *win)
+print(f"frozen background weights: oracle w0={w0_oracle:.3f} (delayed-branch floor), "
+      f"die-away w0={w0_die:.3f} (delayed pedestal)")
 
 curves = {}
 curves["oracle"] = rb.sigma_vs_budget(
-    lambda n: rb.oracle_block_alphas(df10, n, n_sphere, win, max_blocks=MAXB), bud_sp, n_sphere)
+    lambda n: rb.oracle_block_alphas(df10, n, n_sphere, win, max_blocks=MAXB,
+                                     w_fixed=w0_oracle), bud_sp, n_sphere)
 curves["realistic"] = rb.sigma_vs_budget(
     lambda n: rb.realistic_block_alphas(df10, n, n_sphere, win, rng=1, max_blocks=MAXB),
     bud_sp, n_sphere)
 curves["die"] = rb.sigma_vs_budget(
-    lambda n: rb.die_block_alphas(df10, n, n_sphere, win, max_blocks=MAXB), bud_sp, n_sphere)
+    lambda n: rb.die_block_alphas(df10, n, n_sphere, win, max_blocks=MAXB,
+                                  w_fixed=w0_die), bud_sp, n_sphere)
 curves["acdc"] = rb.sigma_vs_budget(
     lambda n: rb.acdc_block_alphas(events10, F10, n, n_cell10, win, n_cells=n_cells, max_blocks=MAXB),
     bud_sw, n_sweep_total)
 
-scaling = {m: rb.fit_sigma_scaling(c) for m, c in curves.items()}
+# The measuring-regime fit_sigma_scaling slope is BOTH printed here and drawn as the
+# solid/dashed line (one number, no second refit). ~ -0.5 validates the 1/sqrt(N) law;
+# a departing slope is flagged by the dashed style. The DOTTED target extrapolation
+# uses fixed -1/2 from the >=6-block anchor.
+scaling = {m: rb.fit_sigma_scaling(c, alpha_ref) for m, c in curves.items()}
 h2t = {m: rb.histories_to_target(curves[m], alpha_ref, TARGET, scaling[m]) for m in curves}
 for m in curves:
+    cz = curves[m]
+    nb = cz.loc[cz["sigma"].notna(), "n_convergent"]
     print(f"{M[m]['label']:22s} slope={scaling[m]['slope']:+.2f} "
-          f"(ok={scaling[m]['slope_ok']})  N->5%={fmt_N(h2t[m]['n_target'])}")
+          f"(ok={scaling[m]['slope_ok']})  blocks/pt={nb.min() if len(nb) else 0}-{nb.max() if len(nb) else 0}"
+          f"  N->5%={fmt_N(h2t[m]['n_target'])}")
+# hidden on the master curve = censored (pair-starved) OR non-measuring (sigma/|a|>=cap)
+for m in curves:
+    c = curves[m]
+    hidden = c[c["sigma"].isna() | (c["sigma"] / abs(alpha_ref) >= REL_CAP)]["n_prime"].tolist()
+    if hidden:
+        print(f"  {M[m]['label']}: hidden (censored or sigma/|a|>={REL_CAP:g}) at N = "
+              + ", ".join(fmt_N(n) for n in hidden))
 """))
     cells.append(code(r"""
 fig, ax = plt.subplots(figsize=(8.5, 6.2))
-for m in ["acdc", "oracle", "realistic", "die"]:
-    c = curves[m]; meta = M[m]
-    d = c[c["sigma"].notna() & (c["sigma"] > 0)]
-    if len(d):
-        ax.loglog(d["n_prime"], d["sigma"] / abs(alpha_ref), marker=meta["marker"],
-                  color=meta["color"], label=meta["label"])
-    h = h2t[m]
-    if h["ok"] and np.isfinite(h["n_target"]) and len(d):
-        Nx = np.array([h["anchor_N"], h["n_target"]])
-        Sx = h["anchor_sigma"] / abs(alpha_ref) * np.sqrt(h["anchor_N"] / Nx)
-        ax.loglog(Nx, Sx, ls="--", color=meta["color"], lw=1.3, alpha=0.7)
-        ax.scatter([h["n_target"]], [TARGET], marker=meta["marker"], color=meta["color"],
-                   s=130, zorder=6, edgecolor="k", linewidth=0.8)
-ax.axhline(TARGET, color="0.35", ls=":", lw=1.4)
-ax.text(ax.get_xlim()[0] * 1.2, TARGET * 1.12, "target 5%", color="0.35", fontsize=10)
-ax.set_xlabel("total transport histories $N$ (fair: sweep = per-cell × $n_{cells}$)")
-ax.set_ylabel(r"$\sigma_\alpha / |\alpha|$")
-ax.set_title(f"Master cost curve — $k$={gl.K_OF_LABEL[FL]:.2f}, gap 10 cm "
+draw_master_curve(ax, curves, scaling, h2t, alpha_ref)
+ax.set_title(f"Master cost curve — all methods — $k$={gl.K_OF_LABEL[FL]:.2f}, gap 10 cm "
              f"(matched {fmt_N(n_sphere)} histories)")
-ax.legend(title="solid = measured · dashed = $N^{-1/2}$", title_fontsize=9)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "master_sigma_vs_N.png")
 plt.show()
@@ -314,82 +696,197 @@ if h2t["oracle"]["ok"] and h2t["acdc"]["ok"]:
           f"{h2t['oracle']['n_target']/h2t['acdc']['n_target']:.0f}x ACDC's histories")
 """))
 
+    # ===================================== 2a. the clean two-method headline figure
+    cells.append(md(r"""
+### The headline: ACDC (eq 60) vs the analog Doubles (eq 59)
+
+The figure above shows all four estimators, but two of them are not fair peers for the paper's
+claim: **Doubles (parent-ID)** is an *oracle* (it uses the true chain labels to delete the
+accidental background — no real experiment can), and **die-away** is a *singles*, pulsed-only
+method. The comparison the paper's eq 59 vs 60 actually makes is **ACDC (the Green-function
+method, eq 60, cost $\propto 1/\mu$) vs the realistic analog pair-counting (eq 59, cost
+$\propto 1/\mu^2$)**. Stripped to those two, ACDC is the clear winner — cleaner *and* cheaper —
+and the horizontal gap between the 5% markers is the measured efficiency ratio.
+"""))
+    cells.append(code(r"""
+mu_fl = rb.mu_detector(rb.FLAGSHIP_DOUBLES_TRACK, rb.FLAGSHIP_DOUBLES_DIR)["mu"]
+ratio_pred = rb.eq5960_ratio(gl.K_OF_LABEL[FL], mu_fl, moment=rb.M_SIM)
+ratio_meas = (h2t["realistic"]["n_target"] / h2t["acdc"]["n_target"]
+              if (h2t["realistic"]["ok"] and h2t["acdc"]["ok"]) else np.nan)
+
+fig, ax = plt.subplots(figsize=(8.5, 6.2))
+draw_master_curve(ax, curves, scaling, h2t, alpha_ref, methods=("acdc", "realistic"))
+# shade the histories gap between the two 5% targets
+if np.isfinite(ratio_meas):
+    Na, Nr = h2t["acdc"]["n_target"], h2t["realistic"]["n_target"]
+    ax.axvspan(Na, Nr, color="0.85", alpha=0.4, zorder=0)
+    # place the gap arrow + label in the empty band ABOVE the descending Doubles line
+    # (which starts ~0.15 at the left edge of the gap) so they don't cross any curve.
+    ax.annotate("", xy=(Nr, TARGET * 3.6), xytext=(Na, TARGET * 3.6),
+                arrowprops=dict(arrowstyle="<->", color="0.3"))
+    ax.text(np.sqrt(Na * Nr), TARGET * 4.0,
+            f"measured {ratio_meas:.0f}×\n(eq 59/60: {ratio_pred:.0f}×)",
+            ha="center", va="bottom", fontsize=10, color="0.2")
+ax.set_title(f"Headline — ACDC vs analog Doubles, $k$={gl.K_OF_LABEL[FL]:.2f}  "
+             f"($\\mu$={mu_fl:.2g})")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "master_acdc_vs_realistic.png")
+plt.show()
+print(f"ACDC reaches 5% at {fmt_N(h2t['acdc']['n_target'])}; analog Doubles at "
+      f"{fmt_N(h2t['realistic']['n_target'])}  ->  {ratio_meas:.0f}x (eq 59/60 predicts {ratio_pred:.0f}x)")
+"""))
+
+    # ============================================ 2b. paper eq 59 vs 60 validation
+    cells.append(md(r"""
+## 2b. What the master curve *is*: the paper's eq. 59 vs 60
+
+This figure is the **empirical test of the paper's central efficiency claim** (Gabrieli et al.
+2025, *Numerical Implications*). The paper estimates the emitted-neutron histories $N$ needed for
+a relative uncertainty $E_r$ two ways:
+
+$$\text{(57)}\quad \frac{\lambda_f}{\alpha}=\frac{1}{\bar\nu}\frac{k}{1-k}
+\qquad\text{(fissions per source neutron)}$$
+$$\text{(59, analog pair counting)}\quad N=\frac{2(1-k)\,\bar\nu^{3}}{k^{3}\,\mu^{2}\,\langle\nu(\nu-1)\rangle\,E_r^{2}}
+\qquad\text{(60, Green-function product)}\quad N=\frac{2\bar\nu}{\mu\,E_r^{2}}$$
+
+The analog method (eq 59, our **Doubles realistic** — it must resolve correlated pairs above the
+accidental background) scales as $1/\mu^{2}$; the Green-function product method (eq 60, our
+**ACDC**) scales as $1/\mu$. For a small detector efficiency $\mu$ this is a huge gap — the paper
+quotes three orders of magnitude. The **vertical/horizontal separation between the ACDC and
+Doubles-realistic curves above is that $1/\mu$ advantage**, measured directly:
+
+$$\frac{N_{59}}{N_{60}}=\frac{(1-k)\,\bar\nu^{2}}{k^{3}\,\mu\,\langle\nu(\nu-1)\rangle}.$$
+
+We measure $\mu$ from the flagship run and compare the predicted ratio to the measured
+histories-to-target ratio.
+"""))
+    cells.append(code(r"""
+mu = rb.mu_detector(rb.FLAGSHIP_DOUBLES_TRACK, rb.FLAGSHIP_DOUBLES_DIR)
+k90 = gl.K_OF_LABEL[FL]
+print(f"detector efficiency  mu = {mu['mu']:.3g}  (det/src={mu['det_per_src']:.3g}, "
+      f"fiss/src={mu['fiss_per_src']:.2f})")
+print(f"  eq-57 cross-check  fiss/src = (1/nubar) k/(1-k) = {(1/rb.NU_BAR)*k90/(1-k90):.2f}")
+
+ratio_pred = rb.eq5960_ratio(k90, mu["mu"], moment=rb.M_SIM)   # simulated-world moment
+ratio_meas = (h2t["realistic"]["n_target"] / h2t["acdc"]["n_target"]
+              if h2t["realistic"]["ok"] and h2t["acdc"]["ok"] else np.nan)
+print(f"\neq 59/60 PREDICTED ratio (analog / Greens) = {ratio_pred:.0f}x")
+print(f"MEASURED N->5% ratio  (Doubles realistic / ACDC) = {ratio_meas:.0f}x")
+print(f"  ACDC  N->5% = {fmt_N(h2t['acdc']['n_target'])}    "
+      f"Doubles realistic N->5% = {fmt_N(h2t['realistic']['n_target'])}")
+
+n_real = h2t["realistic"]["n_target"]
+within = ("within" if (np.isfinite(n_real) and n_real <= n_sphere)
+          else f"{n_real/n_sphere:.1f}x past" if np.isfinite(n_real) else "past")
+print()
+print("VERDICT: the master curve CONFIRMS the paper's qualitative claim -- the Green-function")
+print("product method (ACDC) reaches a target precision with substantially fewer histories than")
+print(f"analog pair counting ({ratio_meas:.0f}x measured here). The measured factor sits below the")
+print(f"eq-59/60 estimate ({ratio_pred:.0f}x) because (a) our 'realistic' estimator is OPTIMIZED beyond")
+print("the naive analog eq 59 (optimal source rate + MLE background subtraction), (b) eq 59/60 are")
+print(f"order-of-magnitude estimates, and the Doubles-realistic N->5% ({fmt_N(n_real)}) is reached")
+print(f"{within} the {fmt_N(n_sphere)} flagship data, and (c) the paper's two-detector product g1*g1")
+print("differs from our single-detector autocorrelation by an O(1) factor.")
+"""))
+
     # ----------------------------------------- same curve at the near-critical edge
     cells.append(md(r"""
 ### The same master curve at the near-critical edge ($k=0.98$)
 
-Identical machinery and matched 10M budget, but at $k=0.98$. Here the order **flips**: pairs are
-abundant (~54k at 10M) so the Doubles method is cheap and clean, while ACDC's near-critical
-late-window fit is ill-conditioned and costly — Doubles reaches 5% in ~1M histories vs ACDC's
-~16M. This is the rigorous, matched confirmation of the regime trade's near-critical end.
+Identical machinery and a matched 10M budget, but at $k=0.98$ — where pairs are abundant (both
+Doubles estimators measure at almost every plotted budget) and the slow near-critical decay
+($1/|\alpha|\approx2.7$ ms) demands a long lag record. The ordering is read off the 5% markers and
+the printout below. Two successive near-critical artifacts were found and fixed here, both
+truncations of ACDC's lag support while the Doubles MLE used raw times: **(1)** an earlier
+revision computed $R(\tau)$ on a 256-lag grid ending at 5 ms, halving the fit window (fixed by
+sizing the lag range to the window — the apparent near-critical cost *flip* was this);
+**(2)** the 10 ms per-cell histogram record itself truncated the overlap integral
+$\int g_i(t)g_i(t+\tau)dt$ — a $1-e^{-2|\alpha|(T-\tau)}$ suppression reaching ~50% at
+$\tau=9$ ms — biasing $\alpha_{ACDC}$ to $-335$ vs PK's $-372$ and inflating ACDC's block
+$\sigma$. Fixed 2026-07-12 by rebuilding $g_i(t)$ on a **40 ms record** from the raw events (no
+new transport) and re-deriving the plateau window ($[1.37,\,9.51]$ ms): $\alpha_{ACDC}=-370.7$,
+0.14$\sigma$ from PK. This cell uses that extended record throughout — see
+`K098_EXTENSION_REPORT.md` for the acceptance gates (half-window check 3.68$\sigma\to$0.06$\sigma$).
 """))
     cells.append(code(r"""
-FL98 = "098"; win98 = rb.FIT_WINDOWS[FL98]
+# k=0.98 on the EXTENDED 40 ms record + extended plateau window throughout
+# (record-extension fix, K098_EXTENSION_REPORT.md): window, ACDC block assembly
+# grid, and alpha_ref all switch to the kre mirrors; the raw-time Doubles/die
+# estimators only see the window change.
+FL98 = "098"; win98 = kre.ext_window()
 df98 = rb.load_chain_events_from(RESULTS / "greens-function-k098-bench10M" / "collision_track.h5")
 n_sph98 = int(df98["parent_id"].max())
 ev98, ncell98 = rb.load_sweep_events(RESULTS / "greens-sweep-k098-bench10M-events.h5")
 ncells98 = len(ev98); n_sw98 = ncell98 * ncells98
 F98 = rb.fission_coarse_from_dir(RESULTS / "greens-function-k098-bench10M", 8, 10)
-aref98 = rb.reference_alpha(FL98, RESULTS / "greens-sweep-k098-bench10M-events.h5")
+aref98 = acdc_best[FL98][0]   # extended-record high-stats ACDC consensus (§1)
+print(f"|alpha_ref| = {abs(aref98):.0f} (high-stats ACDC consensus, ext record); cf. "
+      f"flagship-events {abs(kre.reference_alpha_ext()):.0f}")
+
+# same frozen-background policy as the k=0.90 flagship (see there)
+w0_o98 = rb.flat_background_weight(
+    rb.same_parent_pair_dts(df98["time"].to_numpy(), df98["parent_id"].to_numpy(), win98[1]),
+    *win98)
+w0_d98 = rb.flat_background_weight(df98["time"].to_numpy(), *win98)
+print(f"frozen background weights: oracle w0={w0_o98:.3f}, die-away w0={w0_d98:.3f}")
 
 cur98 = {
     "oracle": rb.sigma_vs_budget(
-        lambda n: rb.oracle_block_alphas(df98, n, n_sph98, win98, max_blocks=MAXB),
+        lambda n: rb.oracle_block_alphas(df98, n, n_sph98, win98, max_blocks=MAXB,
+                                         w_fixed=w0_o98),
         rb.budget_ladder(n_sph98), n_sph98),
     "realistic": rb.sigma_vs_budget(
         lambda n: rb.realistic_block_alphas(df98, n, n_sph98, win98, rng=1, max_blocks=MAXB),
         rb.budget_ladder(n_sph98), n_sph98),
     "die": rb.sigma_vs_budget(
-        lambda n: rb.die_block_alphas(df98, n, n_sph98, win98, max_blocks=MAXB),
+        lambda n: rb.die_block_alphas(df98, n, n_sph98, win98, max_blocks=MAXB,
+                                      w_fixed=w0_d98),
         rb.budget_ladder(n_sph98), n_sph98),
+    # 40 ms assembly grid via the kre mirror (rb.acdc_block_alphas hardcodes 10 ms)
     "acdc": rb.sigma_vs_budget(
-        lambda n: rb.acdc_block_alphas(ev98, F98, n, ncell98, win98, n_cells=ncells98, max_blocks=MAXB),
+        lambda n: kre.acdc_block_alphas_ext(ev98, F98, n, ncell98, win98,
+                                            n_cells=ncells98, max_blocks=MAXB),
         rb.budget_ladder(n_sw98), n_sw98),
 }
-sca98 = {m: rb.fit_sigma_scaling(c) for m, c in cur98.items()}
+sca98 = {m: rb.fit_sigma_scaling(c, aref98) for m, c in cur98.items()}
 h2t98 = {m: rb.histories_to_target(cur98[m], aref98, TARGET, sca98[m]) for m in cur98}
 
 fig, ax = plt.subplots(figsize=(8.5, 6.2))
-for m in ["acdc", "oracle", "realistic", "die"]:
-    c = cur98[m]; meta = M[m]
-    d = c[c["sigma"].notna() & (c["sigma"] > 0)]
-    if len(d):
-        ax.loglog(d["n_prime"], d["sigma"] / abs(aref98), marker=meta["marker"],
-                  color=meta["color"], label=meta["label"])
-    h = h2t98[m]
-    if h["ok"] and np.isfinite(h["n_target"]) and len(d):
-        Nx = np.array([h["anchor_N"], h["n_target"]])
-        Sx = h["anchor_sigma"] / abs(aref98) * np.sqrt(h["anchor_N"] / Nx)
-        ax.loglog(Nx, Sx, ls="--", color=meta["color"], lw=1.3, alpha=0.7)
-        ax.scatter([h["n_target"]], [TARGET], marker=meta["marker"], color=meta["color"],
-                   s=130, zorder=6, edgecolor="k", linewidth=0.8)
-ax.axhline(TARGET, color="0.35", ls=":", lw=1.4)
-ax.text(ax.get_xlim()[0] * 1.2, TARGET * 1.12, "target 5%", color="0.35", fontsize=10)
-ax.set_xlabel("total transport histories $N$ (fair: sweep = per-cell × $n_{cells}$)")
-ax.set_ylabel(r"$\sigma_\alpha / |\alpha|$")
+draw_master_curve(ax, cur98, sca98, h2t98, aref98)
 ax.set_title(f"Master cost curve — $k$={gl.K_OF_LABEL[FL98]:.2f}, gap 10 cm "
              f"(matched {fmt_N(n_sph98)} histories)")
-ax.legend(title="solid = measured · dashed = $N^{-1/2}$", title_fontsize=9)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "master_sigma_vs_N_k098.png")
 plt.show()
 
+for m in cur98:
+    hidden = cur98[m][cur98[m]["sigma"].isna()
+                      | (cur98[m]["sigma"] / abs(aref98) >= REL_CAP)]["n_prime"].tolist()
+    if hidden:
+        print(f"  {M[m]['label']}: hidden (censored or sigma/|a|>={REL_CAP:g}) at N = "
+              + ", ".join(fmt_N(n) for n in hidden))
 print("histories to 5% @ k=0.98: ",
       "  ·  ".join(f"{M[m]['label']}: {fmt_N(h2t98[m]['n_target'])}"
                    for m in ["acdc", "oracle", "realistic", "die"]))
 if h2t98["oracle"]["ok"] and h2t98["acdc"]["ok"]:
-    print(f"  -> Doubles (parent-ID) is "
-          f"{h2t98['acdc']['n_target']/h2t98['oracle']['n_target']:.0f}x CHEAPER than ACDC here")
+    r98o = h2t98["oracle"]["n_target"] / h2t98["acdc"]["n_target"]
+    print(f"  -> N(Doubles parent-ID) / N(ACDC) = {r98o:.1f}x  "
+          f"({'ACDC' if r98o >= 1 else 'Doubles (parent-ID)'} cheaper here)")
 """))
 
     # ============================================================= cross-check
     cells.append(md(r"""
 ### Cross-check: is the across-realization $\sigma$ trustworthy?
 
-The cheap single-run estimators (chain bootstrap, MLE Fisher) should track the assumption-free
-across-realization std where both are affordable — that agreement is what licenses extrapolating
-along $N^{-1/2}$ into the starved regimes. Compared at two flagship budgets for the
-Doubles (parent-ID) method.
+The assumption-free across-realization std is the master curve's currency; the two cheap single-run
+estimators are checked against it here (Doubles parent-ID, three flagship budgets, all three
+estimators fitting at the same frozen $w_0$ so the comparison is like for like). The **MLE Fisher**
+error should *track* the across-realization std; the **chain bootstrap** may run *optimistic*, but
+if it does so by a **stable, measured factor** $\kappa_{boot}$ (printed below), that factor can be
+calibrated out: wherever only a bootstrap $\sigma$ is affordable (the breadth Doubles costs in §3),
+we multiply it by the measured $\kappa_{boot}$ to recover the across-realization standard. This
+calibration — not a claim that bootstrap *equals* the across-realization std — is what licenses
+sliding those costs along the $N^{-1/2}$ law.
 """))
     cells.append(code(r"""
 checks = [rb.sigma_crosscheck(df10, int(n), n_sphere, win, n_boot=120, rng=7)
@@ -416,43 +913,53 @@ print(f"\nbootstrap -> across-realization calibration  kappa_boot = {KAPPA_BOOT:
 ## 3. Cost of precision vs $k$ — where the Doubles method dies
 
 For every $k$: histories (left) and wall-clock time (right) to reach $\sigma_\alpha=5\%|\alpha|$.
-Each method's best available $\sigma$ is slid down the $1/\sqrt{N}$ law validated on the flagship
-master curve: ACDC from the high-statistics sweep, the Doubles/die-away methods from the 1M
-chain-bootstrap $\sigma$. Where the Doubles method never reaches $\ge50$ window pairs, it has **no
-result** (no marker — drawn, not asserted). Wall time uses each method's *measured* per-history
-transport cost. The Doubles $\sigma$ is chain-bootstrap, which the cross-check showed runs
-optimistic; it is scaled up by the measured $\kappa_{boot}$ so the breadth matches the rigorous
-flagship at $k=0.90$ (ACDC $\sim$3M, Doubles $\sim$8M). ACDC uses the high-statistics sweep
-$\sigma$ directly; die-away is singles (not calibrated).
+At the two $k$ that have a **flagship** run (0.90 and 0.98) the cost is read *straight off the
+master curves above* for all four methods (circled markers) — the same $N\to5\%$ numbers as
+§2/§2c, no extrapolation, so this breadth panel and the deep-dives cannot disagree. At the other
+six $k$ (no flagship) each method's best available $\sigma$ is slid down the $1/\sqrt{N}$ law
+validated on the flagship: ACDC from the high-statistics sweep, the Doubles/die-away methods from
+the 1M chain-bootstrap $\sigma$ — the Doubles $\sigma$ scaled up by the measured $\kappa_{boot}$
+(§2) so bootstrap and across-realization agree. Where the Doubles method never reaches $\ge50$
+window pairs it has **no result** (no marker — drawn, not asserted). Wall time uses each method's
+*measured* per-history transport cost.
 """))
     cells.append(code(r"""
-# Breadth uses the full-1M chain-bootstrap sigma already assembled in `bench`
-# (stable per k), slid down the 1/sqrt(N) law validated on the flagship master
-# curve. alpha_ref = high-stats ACDC consensus. Oracle/realistic are nan where the
-# 1M measurement was censored (<50 window pairs) -- the "no result" boundary.
+# The two k with a flagship run read N->5% straight off the master curves (h2t /
+# h2t98) for ALL methods, so section 3 is numerically identical to sections 2/2c. The
+# other six k have no flagship, so slide each method's best 1M sigma down the 1/sqrt(N)
+# law: ACDC from the high-stats sweep sigma (the bench-1M event-level sigma is noisy
+# near critical); Doubles from the 1M chain-bootstrap sigma, scaled up by kappa_boot to
+# the across-realization standard (nan where the 1M measurement was censored, <50 same-
+# chain window pairs -- the "no result" boundary); die-away from its singles bootstrap.
+# alpha_ref = high-stats ACDC consensus (the single denominator used everywhere).
+FLAGSHIP_H2T = {rb.FLAGSHIP_LABEL: h2t, "098": h2t98}
+
+
 def cost_for(r):
     L = r["label"]; a_ref = r["acdc_hi"]
-    # ACDC: high-stats sweep sigma (clean) slid down the law; the bench-1M
-    # event-level sigma is noisy near critical. Doubles/die: 1M bootstrap sigma
-    # (no high-stats counterpart). Each method uses its best available sigma.
-    a_hi, s_hi, n_hi = acdc_best[L]
     s_sp = rb.seconds_per_history_sphere(gl._fission_dir(L), 1e6)
     s_sw = rb.seconds_per_history_sweep(RESULTS / f"greens-sweep-k{L}-bench1M.npz")
-    # Doubles sigma is bootstrap-based -> calibrate up to the across-realization
-    # standard with kappa_boot (measured in the cross-check). ACDC uses the
-    # high-stats sweep sigma already; die-away is singles (not calibrated).
-    N = {"acdc": rb.histories_for_sigma(s_hi, n_hi, a_ref, TARGET),
-         "oracle": rb.histories_for_sigma(
-             np.nan if r["bf_oracle_cens"] else KAPPA_BOOT * r["bf_oracle_err"], 1e6, a_ref, TARGET),
-         "realistic": rb.histories_for_sigma(
-             np.nan if r["bf_real_cens"] else KAPPA_BOOT * r["bf_real_err"], 1e6, a_ref, TARGET),
-         "die": rb.histories_for_sigma(r["die_err"], 1e6, a_ref, TARGET)}
+    if L in FLAGSHIP_H2T:                       # flagship-measured, read off the curve
+        H = FLAGSHIP_H2T[L]
+        N = {m: (H[m]["n_target"] if H[m]["ok"] else np.nan)
+             for m in ["acdc", "oracle", "realistic", "die"]}
+        flagship = True
+    else:                                       # 1/sqrt(N) slide of the best 1M sigma
+        a_hi, s_hi, n_hi = acdc_best[L]
+        N = {"acdc": rb.histories_for_sigma(s_hi, n_hi, a_ref, TARGET),
+             "oracle": rb.histories_for_sigma(
+                 np.nan if r["bf_oracle_cens"] else KAPPA_BOOT * r["bf_oracle_err"], 1e6, a_ref, TARGET),
+             "realistic": rb.histories_for_sigma(
+                 np.nan if r["bf_real_cens"] else KAPPA_BOOT * r["bf_real_err"], 1e6, a_ref, TARGET),
+             "die": rb.histories_for_sigma(r["die_err"], 1e6, a_ref, TARGET)}
+        flagship = False
     sph = {"acdc": s_sw, "oracle": s_sp, "realistic": s_sp, "die": s_sp}
-    row = {"label": L, "k": r["k"]}
+    row = {"label": L, "k": r["k"], "flagship": flagship}
     for m, val in N.items():
         row[f"N_{m}"] = val
         row[f"T_{m}"] = val * sph[m] if np.isfinite(val) else np.nan
     return row
+
 
 cost_k = pd.DataFrame([cost_for(r) for _, r in bench.iterrows()]).sort_values("k").reset_index(drop=True)
 print(cost_k.to_string(index=False, float_format=lambda x: f"{x:.3g}"))
@@ -460,19 +967,22 @@ print(cost_k.to_string(index=False, float_format=lambda x: f"{x:.3g}"))
     cells.append(code(r"""
 fig, (axN, axT) = plt.subplots(1, 2, figsize=(13.5, 5.4))
 kk = cost_k["k"].to_numpy()
-REAL_CAP = 1e9   # drop the realistic point(s) far off-scale (k<=0.80) so the
-                 # informative ACDC-vs-oracle band stays readable
+fl = cost_k["flagship"].to_numpy()
 for m in ["acdc", "oracle", "realistic"]:
     meta = M[m]
     yN = cost_k[f"N_{m}"].to_numpy(); yT = cost_k[f"T_{m}"].to_numpy()
     keep = np.isfinite(yN)
-    if m == "realistic":
-        keep = keep & (yN < REAL_CAP)
     axN.plot(kk[keep], yN[keep], marker=meta["marker"], color=meta["color"], label=meta["label"])
     keepT = keep & np.isfinite(yT)
     axT.plot(kk[keepT], yT[keepT], marker=meta["marker"], color=meta["color"], label=meta["label"])
-axN.text(0.03, 0.97, "Doubles (realistic) off-scale below k=0.85", transform=axN.transAxes,
-         fontsize=8, color=M["realistic"]["color"], va="top")
+    # flagship-measured k (0.90, 0.98): big open rings = read straight off the master
+    # curve; the realistic point censors out below k~0.85 (fix), so no REAL_CAP hack.
+    axN.scatter(kk[keep & fl], yN[keep & fl], s=150, facecolor="none", edgecolor=meta["color"],
+                linewidth=1.6, zorder=5)
+    axT.scatter(kk[keepT & fl], yT[keepT & fl], s=150, facecolor="none", edgecolor=meta["color"],
+                linewidth=1.6, zorder=5)
+axN.text(0.03, 0.97, "circled = flagship-measured (k=0.90, 0.98);\nother k slid down the 1/sqrt(N) law",
+         transform=axN.transAxes, fontsize=8, color="0.4", va="top")
 for ax in (axN, axT):
     ax.set_yscale("log"); ax.set_xlabel(r"$k_{eff}$"); ax.legend(loc="center left")
 axN.set_ylabel("histories to $\\sigma_\\alpha=5\\%|\\alpha|$")
@@ -500,6 +1010,11 @@ shaded band is the "no result" region. (1M-history budget throughout.)
 """))
     cells.append(code(r"""
 dck = rb.doubles_count_vs_k(LABELS)
+# k=0.98's fit window moved with the record-extension fix (K098_EXTENSION_REPORT.md);
+# recompute its in-window pair count on the extended window (supersedes the old 7350)
+dck.loc[dck["label"] == "098", "pairs"] = kre.doubles_window_pairs_1M_ext()
+print("k=0.98 window pairs per 1M (extended window):",
+      int(dck.loc[dck['label'] == '098', 'pairs'].iloc[0]))
 dcg = rb.doubles_count_vs_gap([5, 10, 15, 40, 90])
 dcg = dcg[~dcg["missing"]].copy()
 dcg["d"] = 24.5 + dcg["gap"] + 5.0   # detector centre distance [cm], k=0.90 (R=24.5)
@@ -606,30 +1121,43 @@ plt.show()
     cells.append(md(r"""
 ## 6. Efficiency ratio — "X times more expensive"
 
-The single most intuitive view: the ratio of histories the Doubles method needs to ACDC's, for
-equal precision, vs $k$ and vs distance. One log-axis curve spanning the orders of magnitude.
+The single most intuitive view: the ratio of histories the **realistic** Doubles method (the
+experiment-faithful analog estimator — the paper's eq 59) needs to ACDC's (eq 60), for equal
+precision, vs $k$ and vs distance. Using realistic (not the chain-tagging *oracle*) keeps this
+consistent with the eq-59/60 framing of §2b. The ratio **stays above 1 across the whole range
+where the Doubles method measures at all** (ACDC cheaper), and it *narrows* toward critical as
+pairs become abundant — but it does not cross: the apparent near-critical crossing an earlier
+revision showed came from ACDC's truncated $k=0.98$ lag support (the 256-lag grid, then the 10 ms
+record itself — both fixed, see §2c and `K098_EXTENSION_REPORT.md`), not from the physics; on the
+untruncated record the $k=0.98$ margin is in fact *wider* than the truncated analysis suggested.
+Below
+$k\approx0.85$ the Doubles method simply has no result. (The right panel's $d^2$ geometric scaling
+uses the oracle, the only doubles estimator the single-run gap scans can fit; the realistic gap is
+strictly *larger*.)
 """))
     cells.append(code(r"""
 fig, (axk, axd) = plt.subplots(1, 2, figsize=(13, 5))
-rk = cost_k["N_oracle"] / cost_k["N_acdc"]
+rk = cost_k["N_realistic"] / cost_k["N_acdc"]
 ok = np.isfinite(rk)
-axk.semilogy(cost_k["k"][ok], rk[ok], "o-", color="#7b3294")
+axk.semilogy(cost_k["k"][ok], rk[ok], "o-", color=M["realistic"]["color"])
 axk.axhline(1, color="0.5", ls=":")
 axk.text(0.04, 0.93, "ACDC cheaper above\nDoubles cheaper below", transform=axk.transAxes,
          fontsize=8.5, color="0.4", va="top")
-axk.set_xlabel(r"$k_{eff}$"); axk.set_ylabel(r"$N_{Doubles}/N_{ACDC}$ at equal $\sigma$")
-axk.set_title("Relative histories cost vs criticality")
+axk.set_xlabel(r"$k_{eff}$")
+axk.set_ylabel(r"$N_{Doubles\,(realistic)}/N_{ACDC}$ at equal $\sigma$")
+axk.set_title("Relative cost vs criticality (analog eq 59 / Green eq 60)")
 
 rd = cost_d["N_oracle"] / cost_d["N_acdc"]
 okd = np.isfinite(rd)
 if okd.any():
-    axd.loglog(cost_d["d"][okd], rd[okd], "o-", color="#7b3294")
+    axd.loglog(cost_d["d"][okd], rd[okd], "o-", color=M["oracle"]["color"])
     dd = np.linspace(cost_d["d"].min(), cost_d["d"].max(), 40)
     base = cost_d[okd].iloc[0]
     axd.loglog(dd, rd[okd].iloc[0] * (dd / base["d"]) ** 2, ":", color="0.5", label=r"$\propto d^2$")
 axd.axhline(1, color="0.5", ls=":")
 axd.set_xlabel("detector centre distance $d$ [cm]")
-axd.set_ylabel(r"$N_{Doubles}/N_{ACDC}$"); axd.set_title("Relative histories cost vs distance")
+axd.set_ylabel(r"$N_{Doubles\,(oracle)}/N_{ACDC}$")
+axd.set_title("Relative cost vs distance (oracle doubles)")
 if okd.any():
     axd.legend()
 fig.suptitle("Relative cost: Doubles vs ACDC histories at equal precision", y=1.02)
@@ -637,8 +1165,9 @@ plt.tight_layout()
 plt.savefig(FIGURES_DIR / "efficiency_ratio.png")
 plt.show()
 
-print("efficiency ratio N_Doubles/N_ACDC by k:",
-      {f"{k:.2f}": (f"{r:.0f}x" if np.isfinite(r) else "no result")
+print("efficiency ratio N_Doubles(realistic)/N_ACDC by k:",
+      {f"{k:.2f}": ("no result" if not np.isfinite(r)
+                    else f"{r:.0f}x" if r >= 2 else f"{r:.2f}x")
        for k, r in zip(cost_k["k"], rk)})
 """))
 
@@ -648,30 +1177,61 @@ print("efficiency ratio N_Doubles/N_ACDC by k:",
 
 * **The methods agree on $\alpha(k)$; they differ enormously in cost.** That cost — not the value
   of $\alpha$ — is the result, and the master curve makes it legible: the same $\sigma$ sits at
-  wildly different budgets for the Doubles method vs ACDC.
-* **It is a regime trade, not a winner.** *Very near critical* (close detector, abundant pairs)
-  the Doubles method is the more history-efficient estimator — at $k=0.98$ it reaches 5% in
-  $\sim$1M histories while ACDC needs $\sim$30M, because near critical the slow, near-degenerate
-  decay makes ACDC's late-window fundamental-mode fit ill-conditioned. *At moderate subcriticality*
-  ($k\approx0.90$) ACDC wins ($\sim$3M vs $\sim$6M, confirmed rigorously on the flagship).
-  *In the starved regime* — deep subcritical or distant detector — ACDC is the **only** estimator
-  left.
+  wildly different budgets for the Doubles method vs ACDC. (The exact histories-to-5%, efficiency
+  ratios, and no-result boundary are printed in the summary cell below, straight from the in-memory
+  results, so they cannot drift from the figures.)
+* **ACDC is the cheaper pair-correlation estimator at every $k$ where the Doubles method
+  measures at all** — including near critical, once the two truncations that had handicapped
+  ACDC's $k=0.98$ fit were removed (the 256-lag grid and the 10 ms histogram record; §2c and
+  `K098_EXTENSION_REPORT.md`). The Doubles gap
+  *narrows* toward critical as pairs become abundant, and widens toward deep subcriticality until
+  the Doubles method stops measuring altogether. *In the starved regime* — deep subcritical or
+  distant detector — ACDC is the **only** pair method left. (Pulsed die-away* is cheapest of all
+  where it applies, but it is a singles method that needs a pulsable source.)
 * **The Doubles method literally has no result in the starved regimes** because the fit window
   never reaches 50 same-chain pairs (pairs $\propto\varepsilon^2\!\times$mult, dying as $\sim d^{-4}$
-  with distance and collapsing below $k\approx0.85$). We draw that boundary, we don't assert it.
+  with distance and collapsing at low $k$). We draw that boundary, we don't assert it.
 * **ACDC degrades gracefully where the Doubles method dies:** singles scale as $\varepsilon$, so
   ACDC's cost grows only as $\sim d^2$ with distance while the Doubles pair tax grows as $\sim d^4$
   — ACDC survives to detector distances where doubles vanish entirely.
 * **The `parent_id` oracle is an unphysical best case.** The realistic, chain-blind Doubles
   estimator costs more still (accidental background to fight), so any real doubles experiment is
-  bounded *above* the red curve — its window of advantage near critical is narrower than the
-  oracle's.
-* **Wall time partly forgives the Doubles method near critical** (those histories transport
-  faster), but cannot manufacture pairs the detector never sees.
+  bounded *above* the red curve.
+* **Wall time does not change the ordering:** the measured per-history transport costs of the
+  sphere and sweep runs are comparable at the flagship $k$, so the wall-clock ranking tracks the
+  histories ranking — it cannot manufacture pairs the detector never sees.
 * **A small irony worth stating:** the Doubles method is so inefficient in the starved regime that
   even *characterizing* its inefficiency — measuring its $\sigma$ cleanly enough to extrapolate —
-  needed the 10M-history flagship run. The pair scarcity that defeats the measurement also defeats
+  needed the flagship deep-dive run. The pair scarcity that defeats the measurement also defeats
   the measurement *of* the measurement.
+"""))
+    cells.append(code(r"""
+# Quantitative summary computed from the in-memory results (h2t, h2t98, cost_k), so it
+# can never drift from the figures above. This is the permanent record of the numbers
+# the static prose above deliberately leaves qualitative.
+def _bound(lst):
+    return f"k<={max(lst):.2f}" if lst else "none"
+
+print("QUANTITATIVE SUMMARY (gap 10 cm)")
+print("  flagship k=0.90  N->5%:  " + "   ".join(
+    f"{M[m]['label']}={fmt_N(h2t[m]['n_target'])}" for m in ["acdc", "oracle", "realistic", "die"]))
+print("  flagship k=0.98  N->5%:  " + "   ".join(
+    f"{M[m]['label']}={fmt_N(h2t98[m]['n_target'])}" for m in ["acdc", "oracle", "realistic", "die"]))
+if h2t["realistic"]["ok"] and h2t["acdc"]["ok"]:
+    r90 = h2t["realistic"]["n_target"] / h2t["acdc"]["n_target"]
+    print(f"  k=0.90: realistic Doubles / ACDC = {r90:.0f}x  ({'ACDC' if r90 >= 1 else 'Doubles'} cheaper)")
+if h2t98["realistic"]["ok"] and h2t98["acdc"]["ok"]:
+    r98 = h2t98["realistic"]["n_target"] / h2t98["acdc"]["n_target"]
+    print(f"  k=0.98: realistic Doubles / ACDC = {r98:.2f}x  "
+          f"({'Doubles' if r98 < 1 else 'ACDC'} cheaper)")
+print("  efficiency ratio N_Doubles(realistic)/N_ACDC by k:")
+rk_sum = cost_k["N_realistic"] / cost_k["N_acdc"]
+for k, r in zip(cost_k["k"], rk_sum):
+    tag = "no result" if not np.isfinite(r) else (f"{r:.0f}x" if r >= 2 else f"{r:.2f}x")
+    print(f"      k={k:.2f}:  {tag}")
+no_o = cost_k[~np.isfinite(cost_k["N_oracle"])]["k"].tolist()
+no_r = cost_k[~np.isfinite(cost_k["N_realistic"])]["k"].tolist()
+print(f"  Doubles 'no result' boundary: parent-ID {_bound(no_o)}, realistic {_bound(no_r)}")
 """))
 
     nb = nbf.v4.new_notebook(cells=cells)

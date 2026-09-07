@@ -38,11 +38,12 @@ Consequences:
   NU2_PHYSICAL — a pure scale factor on R(tau), irrelevant to alpha and to the
   sigma-vs-budget comparisons.
 """
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit, minimize_scalar
+from scipy.optimize import OptimizeWarning, curve_fit, minimize_scalar
 
 from project.analysis import greens_loader as gl
 from project.analysis.timing_utils import load_collision_tracks
@@ -183,7 +184,7 @@ def stationarize(df: pd.DataFrame, t_window: float, rng=None) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
-                  background: str = "flat"):
+                  background: str = "flat", w_fixed: float | None = None):
     """Unbinned MLE of alpha for pair separations on [tau_min, tau_max].
 
     background='none': pdf(t) = alpha exp(alpha t) / (exp(alpha b) - exp(alpha a)).
@@ -192,9 +193,20 @@ def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
         (separations set by precursor-decay time differences) that the prompt
         ACDC formula cannot contain; the ACDC fit absorbs its floor in the A
         term, so the BF estimator must model it too or alpha biases shallow.
+    background='fixed': the SAME mixture pdf but with the background weight
+        FROZEN at w_fixed (1-D fit over alpha only). The benchmark block
+        estimators use this: the floor fraction is a per-system constant (see
+        flat_background_weight), so refloating it in every few-hundred-pair
+        block is ill-conditioned — the barely-identified w leaks its variance
+        into alpha and inflates the across-block sigma.
     background='auto': 'flat' when n >= 200 (the 2-param fit needs the floor to
         be resolvable), else 'none'; falls back to 'none' if the flat fit
         degenerates (non-finite sigma or w pinned to a boundary).
+        CAVEAT: the n=200 switch SPLICES two estimators of different variance
+        into one sigma(N) curve — on the k=0.90 flagship the across-block sigma
+        jumps at the budget where blocks cross 200 window pairs (~1M histories),
+        faking a shallow sigma(N) slope. The budget-ladder/bootstrap paths
+        therefore use 'fixed'; 'auto' remains for single full-dataset fits.
 
     Valid at any pair count (a 512-bin LSQ fit is not, e.g. 39 pairs at k=0.40).
     Returns (alpha, sigma_asymptotic, n_pairs); sigma from the observed Fisher
@@ -223,6 +235,21 @@ def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
         log_int = alpha * a + np.log(np.expm1(w) / alpha) if w > -700 else alpha * a - np.log(-alpha)
         return alpha * t - log_int
 
+    if background == "fixed":
+        if w_fixed is None or not np.isfinite(w_fixed):
+            raise ValueError("background='fixed' requires a finite w_fixed")
+        w0 = float(np.clip(w_fixed, 0.0, 1.0 - 1e-6))
+        log_bg = (np.log(w0) - np.log(b - a)) if w0 > 0 else -np.inf
+
+        def negll_fx(alpha):
+            return -np.logaddexp(log_bg, np.log1p(-w0) + log_truncexp(alpha)).sum()
+
+        res = minimize_scalar(negll_fx, bounds=(-1e6, -1e-2), method="bounded")
+        alpha = res.x
+        h = max(abs(alpha) * 1e-4, 1e-6)
+        d2 = (negll_fx(alpha + h) - 2 * negll_fx(alpha) + negll_fx(alpha - h)) / h**2
+        return float(alpha), float(1.0 / np.sqrt(d2)) if d2 > 0 else np.nan, n
+
     if background == "none":
         tbar = t.mean()
 
@@ -240,11 +267,30 @@ def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
     if background != "flat":
         raise ValueError(f"unknown background {background!r}")
 
+    alpha, sigma, _ = _fit_flat(t, a, b)
+    return float(alpha), float(sigma), n
+
+
+def _fit_flat(t: np.ndarray, a: float, b: float):
+    """2-param MLE of (w, alpha) for pdf = w/(b-a) + (1-w)*trunc-exp on [a, b].
+
+    Returns (alpha, sigma_alpha, w). Shared by fit_alpha_mle(background='flat')
+    and flat_background_weight (which needs the fitted w itself).
+    """
     from scipy.optimize import minimize
+
+    def log_truncexp(alpha):
+        v = alpha * (b - a)
+        log_int = alpha * a + np.log(np.expm1(v) / alpha) if v > -700 else alpha * a - np.log(-alpha)
+        return alpha * t - log_int
 
     def negll2(params):
         logit_w, log_neg_alpha = params
         w = 1.0 / (1.0 + np.exp(-logit_w))
+        # clip off the logit saturation: at w -> 1 (pure-background pull) log1p(-w)
+        # underflows to -inf and spams a divide-by-zero RuntimeWarning; the physical
+        # optimum is interior, so pinning w just inside [0, 1] is harmless.
+        w = float(np.clip(w, 1e-12, 1.0 - 1e-12))
         alpha = -np.exp(log_neg_alpha)
         lp = np.logaddexp(
             np.log(w) - np.log(b - a),
@@ -253,11 +299,12 @@ def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
         return -lp.sum()
 
     # initialize from the pure-exponential fit, small background
-    a0, _, _ = fit_alpha_mle(t, tau_min, tau_max, background="none")
+    a0, _, _ = fit_alpha_mle(t, a, b, background="none")
     x0 = np.array([np.log(0.05 / 0.95), np.log(max(-a0, 1.0))])
     res = minimize(negll2, x0, method="Nelder-Mead",
                    options={"xatol": 1e-6, "fatol": 1e-9, "maxiter": 4000})
     logit_w, log_neg_alpha = res.x
+    w = 1.0 / (1.0 + np.exp(-logit_w))
     alpha = -np.exp(log_neg_alpha)
     # sigma on alpha via numeric Hessian in the transformed coords, projected
     h = 1e-4
@@ -273,7 +320,30 @@ def fit_alpha_mle(dts: np.ndarray, tau_min: float, tau_max: float,
         sigma = abs(alpha) * np.sqrt(max(cov[1, 1], 0))  # d(alpha)/d(log_neg_alpha) = alpha
     except np.linalg.LinAlgError:
         sigma = np.nan
-    return float(alpha), float(sigma), n
+    return float(alpha), float(sigma), float(w)
+
+
+def flat_background_weight(samples: np.ndarray, tau_min: float, tau_max: float) -> float:
+    """Flat-floor background weight w0 on [tau_min, tau_max] from ONE 2-param
+    ('flat') MLE at full statistics, for freezing into background='fixed' fits.
+
+    The floor fraction is a property of the SYSTEM + window — floor and signal
+    counts both scale linearly with budget — so it is estimated once where it is
+    well identified and shared by every block/bootstrap fit. Its residual
+    uncertainty is a COMMON systematic on alpha's value, not part of the
+    per-realization statistical spread; that is what makes freezing it valid for
+    the across-realization sigma. Returns 0.0 (pure trunc-exp, = the 'none' fit)
+    when the floor is not resolvable (n < 200, background='auto''s own
+    threshold) or the 2-param fit degenerates.
+    """
+    t = np.asarray(samples, float)
+    t = t[(t >= tau_min) & (t <= tau_max)]
+    if len(t) < 200:
+        return 0.0
+    _, sigma, w = _fit_flat(t, tau_min, tau_max)
+    if not (np.isfinite(w) and np.isfinite(sigma) and sigma > 0):
+        return 0.0
+    return float(np.clip(w, 0.0, 1.0 - 1e-6))
 
 
 def _binned_exp(tau, A, B, alpha, dt):
@@ -290,10 +360,15 @@ def fit_alpha_binned(tau, R, dt=DT, sigma=None, p0=None):
     """Fit R(tau) = A + B exp(alpha tau) with the bin-integrated model."""
     if p0 is None:
         p0 = [R[-1], R[0] - R[-1], -500.0]
-    popt, pcov = curve_fit(
-        lambda x, A, B, al: _binned_exp(x, A, B, al, dt),
-        tau, R, p0=p0, sigma=sigma, maxfev=50000,
-    )
+    with warnings.catch_warnings():
+        # the plateau/precision scans only read popt; a non-invertible covariance
+        # (curve_fit's OptimizeWarning, common on short/near-degenerate windows) is
+        # expected and harmless there, so silence just that warning locally.
+        warnings.simplefilter("ignore", OptimizeWarning)
+        popt, pcov = curve_fit(
+            lambda x, A, B, al: _binned_exp(x, A, B, al, dt),
+            tau, R, p0=p0, sigma=sigma, maxfev=50000,
+        )
     return popt, np.sqrt(np.diag(pcov))
 
 
@@ -332,6 +407,16 @@ def calibrate_moment(label: str, n_boot: int = 400, rng=None):
 def acdc_rossi(sweep: dict, F_coarse: np.ndarray, tau_max: float = T_MAX, n_tau: int = 256):
     """Corrected-units ACDC R(tau) (delegates to the fixed greens_loader.rossi)."""
     return gl.rossi(sweep, F_coarse, tau_max=tau_max, n_tau=n_tau)
+
+
+def window_lag_count(fit_window) -> int:
+    """Lag bins needed so R(tau) covers a fit window: ceil(hi/DT)+2 (tau centers
+    reach past the window's upper edge), capped at N_T-1. The ACDC fit paths size
+    their lag range from this instead of the 256-lag default (tau <= 5 ms), which
+    silently TRUNCATED the near-critical k098 window [2.0, 9.97] ms to [2, 5] ms
+    — breaking the same-window fairness invariant — while deep-subcritical
+    windows need far fewer lags (k090: ~138), which is also cheaper."""
+    return int(min(N_T - 1, int(np.ceil(fit_window[1] / DT)) + 2))
 
 
 def acdc_rossi_events(events_by_cell: dict, F_flat: np.ndarray, n_source_cell: int,
@@ -571,6 +656,7 @@ def acdc_alpha_vs_budget(events_path, F_flat: np.ndarray, n_source_cell: int,
     if budgets is None:
         budgets = [n_cells * n for n in (1250, 3125, 6250, 12500)]
     time_edges = np.linspace(0.0, T_MAX, N_T + 1)
+    n_lag = window_lag_count(fit_window)     # lag range sized by the window (k098!)
     rows = []
     for B in budgets:
         n_per = B // n_cells
@@ -582,7 +668,7 @@ def acdc_alpha_vs_budget(events_path, F_flat: np.ndarray, n_source_cell: int,
                 m = (p > b * n_per) & (p <= (b + 1) * n_per)
                 if m.any():
                     ev_b[idx] = (t[m], p[m])
-            tau, R = acdc_rossi_events(ev_b, F_flat, n_per, time_edges)
+            tau, R = acdc_rossi_events(ev_b, F_flat, n_per, time_edges, n_tau=n_lag)
             w = (tau >= lo) & (tau <= hi)
             if np.any(R[w] > 0):
                 try:
@@ -617,9 +703,10 @@ def acdc_alpha_sigma(label: str, n_boot: int = 100, rng=None, fit_window=None):
     n_r, n_th = sweep["G"].shape
     F = fission_coarse_sim(label, n_r, n_th)
     lo, hi = fit_window or FIT_WINDOWS[label]
+    n_lag = window_lag_count((lo, hi))       # lag range sized by the window (k098!)
 
     def fit_one(s):
-        tau, R = acdc_rossi(s, F)
+        tau, R = acdc_rossi(s, F, n_tau=n_lag)
         w = (tau >= lo) & (tau <= hi)
         popt, _ = fit_alpha_binned(tau[w], R[w])
         return popt[2]
@@ -695,13 +782,32 @@ def bf_realistic_alpha_sigma(df: pd.DataFrame, n_source: int, fit_window,
     def estimate(d):
         sh = stationarize(d, t_window, rng)
         dts = all_pairs_dts(np.sort(sh["time"].to_numpy()), hi)
-        a, s, n = fit_alpha_mle(dts, lo, hi, background="flat")
+        n_win = int(((dts >= lo) & (dts <= hi)).sum())
+        if n_win == 0:
+            return np.nan, 0
+        # accidental-floor weight from OBSERVABLES ONLY (measured singles count +
+        # duration), frozen into a 1-D fit -- real Rossi-alpha practice; floating
+        # w here is ill-conditioned (see fit_alpha_mle). Its residual uncertainty
+        # is a common systematic, not part of the bootstrap spread.
+        acc = len(d) ** 2 * (hi - lo) / t_window
+        w0 = float(np.clip(acc / n_win, 0.0, 1.0 - 1e-6))
+        if w0 >= 0.999:
+            return np.nan, n_win
+        a, s, n = fit_alpha_mle(dts, lo, hi, background="fixed", w_fixed=w0)
         return a, n
 
+    # Dataset-validity gate: a realistic pair measurement is only meaningful when the
+    # data actually carries enough SAME-CHAIN (correlated) window pairs -- that is a
+    # property of the DATASET, not an oracle the estimator uses (it still sees only the
+    # blind all-pairs stream). Censoring on the all-pairs count instead would never
+    # trip (accidentals dominate the window pairs), so a pair-starved config would
+    # falsely "measure" -- e.g. k=0.80 with ~48 same-chain pairs, below the very floor.
+    n_corr = doubles_window_pairs(df, fit_window)
     alpha, n_pairs = estimate(df)
-    if n_pairs < MIN_PAIRS_FIT or not np.isfinite(alpha):
+    if n_corr < MIN_PAIRS_FIT or not np.isfinite(alpha):
         return {"alpha": np.nan, "sigma": np.nan, "n_pairs": int(n_pairs),
-                "source_rate": source_rate, "censored": True}
+                "n_corr_pairs": int(n_corr), "source_rate": source_rate,
+                "censored": True}
 
     # chain bootstrap (independent of the estimator's oracle-freeness: it only
     # quantifies sampling variability of the underlying chain population)
@@ -725,8 +831,8 @@ def bf_realistic_alpha_sigma(df: pd.DataFrame, n_source: int, fit_window,
     boots = boots[np.isfinite(boots)]
     return {"alpha": float(alpha),
             "sigma": float(np.std(boots)) if len(boots) >= 10 else np.nan,
-            "n_pairs": int(n_pairs), "source_rate": float(source_rate),
-            "censored": False}
+            "n_pairs": int(n_pairs), "n_corr_pairs": int(n_corr),
+            "source_rate": float(source_rate), "censored": False}
 
 
 # --------------------------------------------------------------------------- #
@@ -753,11 +859,16 @@ def die_away_alpha_sigma(df: pd.DataFrame, fit_window, n_boot: int = 60, rng=Non
     it deserves to be benchmarked under its honest name.
 
     sigma via chain bootstrap (detection times within a chain are correlated).
+    The delayed-pedestal weight w0 is fit ONCE on the full dataset (where it is
+    well identified) and FROZEN into the point fit and every bootstrap refit —
+    same policy as the Doubles blocks; w0's residual uncertainty is a common
+    systematic on alpha, not part of the bootstrap spread.
     """
     rng = np.random.default_rng(rng)
     lo, hi = fit_window
     t_all = df["time"].to_numpy()
-    alpha, _, n_in = fit_alpha_mle(t_all, lo, hi, background="flat")
+    w0 = flat_background_weight(t_all, lo, hi)
+    alpha, _, n_in = fit_alpha_mle(t_all, lo, hi, background="fixed", w_fixed=w0)
 
     order = np.argsort(df["parent_id"].to_numpy(), kind="stable")
     t_s = t_all[order]
@@ -768,7 +879,7 @@ def die_away_alpha_sigma(df: pd.DataFrame, fit_window, n_boot: int = 60, rng=Non
     for _ in range(n_boot):
         pick = rng.integers(0, len(uniq), len(uniq))
         tb = np.concatenate([t_s[bounds[g]:bounds[g + 1]] for g in pick])
-        a, _, _ = fit_alpha_mle(tb, lo, hi, background="flat")
+        a, _, _ = fit_alpha_mle(tb, lo, hi, background="fixed", w_fixed=w0)
         boots.append(a)
     boots = np.array(boots)
     boots = boots[np.isfinite(boots)]
@@ -795,6 +906,87 @@ def fission_coarse_from_dir(res_dir: Path | str, n_r: int, n_th: int,
     return moment * F_blk.T
 
 
+# --------------------------------------------------------------------------- #
+# Paper eq 57-60: detector efficiency mu and the analog-vs-Green's-function
+# efficiency ratio (Gabrieli et al. 2025, "Numerical Implications").
+# --------------------------------------------------------------------------- #
+
+NU_BAR = 2.44   # U235 thermal mean neutrons per fission (nubar)
+
+
+def mu_detector(track_path, fission_dir, n_source=None) -> dict:
+    """Detector efficiency mu = detections per fission (the paper's mu), measured
+    from a flagship run: (detections/source) / (fissions/source). detections =
+    collision_track rows; fissions/source = the raw fission tally summed over cells.
+    mu is a geometry property (detector gap + system), ~independent of N. Also
+    returns fissions/source (paper eq 57: (1/nubar) k/(1-k)) for a cross-check."""
+    import openmc
+    df = load_chain_events_from(track_path)
+    if n_source is None:
+        n_source = int(df["parent_id"].max())
+    det_per_src = len(df) / float(n_source)
+    with openmc.StatePoint(str(Path(fission_dir) / "statepoint.1.h5")) as sp:
+        fiss_per_src = float(sp.get_tally(name="fission_per_cell").mean.sum())
+    return {"mu": det_per_src / fiss_per_src, "det_per_src": det_per_src,
+            "fiss_per_src": fiss_per_src, "n_source": int(n_source)}
+
+
+def eq5960_ratio(k: float, mu: float, moment: float = M_SIM, nu: float = NU_BAR) -> float:
+    """Paper eq 59 / eq 60: how many MORE emitted-neutron histories the ANALOG
+    pair-counting estimator (eq 59, our 'Doubles realistic') needs than the
+    Green's-function PRODUCT estimator (eq 60, our 'ACDC') to reach the same total
+    relative uncertainty Er.
+
+        eq 59:  N = 2(1-k) nu^3 / (k^3 mu^2 <nu(nu-1)> Er^2)
+        eq 60:  N = 2 nu / (mu Er^2)
+        ratio = N59/N60 = (1-k) nu^2 / (k^3 mu <nu(nu-1)>)
+
+    Use moment=M_SIM to compare against THIS project's (under-dispersed) simulated
+    curves; moment=NU2_PHYSICAL to predict a real experiment. The 1/mu scaling is
+    the paper's central efficiency claim; the master curve measures it directly."""
+    return (1.0 - k) * nu**2 / (k**3 * mu * moment)
+
+
+def eq60_histories(mu: float, er: float, nu: float = NU_BAR) -> float:
+    """Paper eq 60: emitted-neutron histories for relative uncertainty er on the
+    product of two Green's functions, N ~ 2 nu / (mu er^2)."""
+    return 2.0 * nu / (mu * er**2)
+
+
+def acdc_vs_dieaway_scan(label, width_decay=3.0, s_lo=0.3, s_hi=3.0, n_scan=16,
+                         track_path=None, sweep=None):
+    """alpha(window-start) for ACDC (pair correlation R(tau), a SECOND-moment
+    observable) and die-away (singles arrival envelope, a FIRST-moment observable)
+    on a shared window grid, in fundamental decay times.
+
+    Both decay with the same fundamental alpha asymptotically, but at a FINITE
+    window the pair correlation carries more higher-spatial-mode contamination than
+    the singles envelope, so they disagree early and CONVERGE as the window moves
+    late. This is the proof that any residual ACDC-vs-die-away gap is window-driven
+    mode contamination, not a bug or a real systematic. Returns s_grid (decay
+    times), alpha_acdc, alpha_die, tau_decay.
+    """
+    if sweep is None:
+        sweep = gl.load_sweep(label)
+    n_r, n_th = sweep["G"].shape
+    F = fission_coarse_sim(label, n_r, n_th)
+    tau, R = acdc_rossi(sweep, F, n_tau=N_T - 1)
+    t = (load_chain_events_from(track_path) if track_path is not None
+         else load_chain_events(label))["time"].to_numpy()
+
+    a_fund = _alpha_fund(*plateau_scan(tau, R, n_scan=40))
+    tau_d = 1.0 / abs(a_fund)
+    s_grid = np.linspace(s_lo, s_hi, n_scan)
+    a_ac, a_di = [], []
+    for s in s_grid:
+        lo, hi = s * tau_d, min((s + width_decay) * tau_d, float(tau[-1]))
+        a_ac.append(_alpha_on_window(tau, R, lo, hi))
+        a, _, _ = fit_alpha_mle(t, lo, hi, background="flat")
+        a_di.append(a if (np.isfinite(a) and a < 0) else np.nan)
+    return {"label": label, "s_grid": s_grid, "alpha_acdc": np.array(a_ac),
+            "alpha_die": np.array(a_di), "tau_decay": tau_d, "alpha_fund": a_fund}
+
+
 def load_chain_events_from(track_path: Path | str, prompt_only: bool = True) -> pd.DataFrame:
     """Detector events (time, parent_id) from an explicit collision_track.h5."""
     df = load_collision_tracks(track_path)
@@ -806,17 +998,23 @@ def load_chain_events_from(track_path: Path | str, prompt_only: bool = True) -> 
 
 def bf_alpha_sigma_events(df: pd.DataFrame, fit_window, n_boot: int = 100, rng=None):
     """BF alpha +/- sigma (chain bootstrap) on one dataset; censored dict if the
-    window pair count is below MIN_PAIRS_FIT."""
+    window pair count is below MIN_PAIRS_FIT.
+
+    The delayed-branch floor weight w0 is fit ONCE on the dataset's window pairs
+    and FROZEN into the point fit and every bootstrap refit (like-for-like with
+    the fixed-background block estimators); at <200 pairs w0=0 and the fit is
+    the pure trunc-exp, as background='auto' would also have chosen."""
     lo, hi = fit_window
     dts = same_parent_pair_dts(df["time"].to_numpy(), df["parent_id"].to_numpy(), hi)
     n_pairs = int(((dts >= lo) & (dts <= hi)).sum())
     if n_pairs < MIN_PAIRS_FIT:
         return {"alpha": np.nan, "sigma": np.nan, "n_pairs": n_pairs, "censored": True}
-    alpha, _, _ = fit_alpha_mle(dts, lo, hi, background="auto")
+    w0 = flat_background_weight(dts, lo, hi)
+    alpha, _, _ = fit_alpha_mle(dts, lo, hi, background="fixed", w_fixed=w0)
     boots = bootstrap_chains(
         df, lambda d: fit_alpha_mle(
             same_parent_pair_dts(d["time"].to_numpy(), d["parent_id"].to_numpy(), hi),
-            lo, hi, background="auto")[0],
+            lo, hi, background="fixed", w_fixed=w0)[0],
         n_boot=n_boot, rng=rng,
     )
     boots = boots[np.isfinite(boots)]
@@ -833,9 +1031,10 @@ def acdc_alpha_sigma_events(events: dict, n_source_cell: int, F_flat: np.ndarray
     rng = np.random.default_rng(rng)
     lo, hi = fit_window
     time_edges = np.linspace(0.0, T_MAX, N_T + 1)
+    n_lag = window_lag_count(fit_window)     # lag range sized by the window (k098!)
 
     def fit_from(ev):
-        tau, R = acdc_rossi_events(ev, F_flat, n_source_cell, time_edges)
+        tau, R = acdc_rossi_events(ev, F_flat, n_source_cell, time_edges, n_tau=n_lag)
         w = (tau >= lo) & (tau <= hi)
         if not np.any(R[w] > 0):
             return np.nan
@@ -945,27 +1144,180 @@ N_SOURCE_BF = 1_000_000     # histories in the existing global runs
 # every method or the comparison is meaningless. Windows ~ [1, 4] late decay
 # times, frozen here and reused in G1/G2/G3.
 FIT_WINDOWS = {
-    "098": (2.7e-3, 1.0e-2),
-    "095": (1.7e-3, 6.7e-3),
-    "090": (7.0e-4, 2.8e-3),
-    "080": (4.6e-4, 1.8e-3),
-    "070": (2.4e-4, 1.0e-3),
-    "060": (2.2e-4, 8.6e-4),
-    "050": (1.7e-4, 6.5e-4),
-    "040": (1.1e-4, 4.4e-4),
+    "098": (0.0020142, 0.0099707),
+    "095": (0.0006939, 0.0046500),
+    "090": (0.0005607, 0.0026545),
+    "080": (0.0002959, 0.0012646),
+    "070": (0.0002149, 0.0008335),
+    "060": (0.0001561, 0.0006159),
+    "050": (0.0000740, 0.0004324),
+    "040": (0.0000598, 0.0003494),
 }
+# ^ DERIVED, not hand-tuned: cached output of compute_fit_windows() (regenerate with
+# `python -m project.analysis.rossi_benchmark --fit-windows`). The rule is
+# plateau_window() below; kept literal so import stays cheap and values are
+# reproducible/diff-able. Each window is [~0.5-1, ~3.5-4] fundamental decay times,
+# the start placed at the earliest lag on the fundamental-mode plateau. Validated
+# against the independent IFP/known alpha at high statistics: k040 +1%, k090 +5%,
+# k070 +6%; k098 -11% (near-critical tau_d so long that 4*tau_d > T_MAX=1e-2, so the
+# window is range-limited -- the old hand window had the same limit). The noisy
+# low-k labels (1M sweeps) carry more window uncertainty; bigger sweeps tighten them.
+
+
+# --------------------------------------------------------------------------- #
+# Principled fit window: the fundamental-mode plateau
+#
+# alpha is the LATE-TIME (fundamental-mode) slope of R(tau). At early lag the
+# window still holds faster higher spatial modes, so the recovered |alpha| is too
+# large; as the window-start moves out, |alpha| falls and then PLATEAUS once only
+# the fundamental mode survives. The window is defined as: start at the earliest
+# lag on that plateau (best statistics among acceptable windows), span ~3 decay
+# times. The plateau is a property of the geometry (the inter-mode settling time),
+# so it is derived once from the cleanest high-statistics observable -- the ACDC
+# pair-correlation R(tau) -- and SHARED by every method (the fairness invariant).
+# --------------------------------------------------------------------------- #
+
+def _median3(y):
+    """3-point running median (nan-aware), endpoints unchanged. Tames the per-point
+    R(tau) jitter of the lower-k (1M, pair-starved) sweeps before slope detection."""
+    y = np.asarray(y, float)
+    out = y.copy()
+    for i in range(1, len(y) - 1):
+        seg = y[i - 1:i + 2]
+        seg = seg[np.isfinite(seg)]
+        if len(seg):
+            out[i] = np.median(seg)
+    return out
+
+
+def _alpha_on_window(tau, R, lo, hi):
+    """Binned-exp alpha over the lag window [lo, hi]; nan if unfittable / non-decaying.
+
+    Requires >= 6 positive bins in the window: a 3-parameter (A, B, alpha) fit on
+    fewer resolvable points produces wild fit-failure zigzags (the low-k late-lag
+    spikes and the left-edge dive on the plateau scans), so those windows are
+    reported as no-measurement rather than plotted.
+    """
+    w = (tau >= lo) & (tau <= hi)
+    if int(np.count_nonzero(R[w] > 0)) < 6:
+        return np.nan
+    try:
+        popt, _ = fit_alpha_binned(tau[w], R[w])
+    except (RuntimeError, ValueError):
+        return np.nan
+    a = popt[2]
+    return float(a) if np.isfinite(a) and a < 0 else np.nan
+
+
+def plateau_scan(tau, R, ratio=4.0, n_scan=30):
+    """alpha vs window-start lo on a log grid, at fixed multiplicative width
+    hi = ratio*lo (scale-free, no alpha needed up front). Returns (lo_grid,
+    alpha_grid). |alpha| descends from the early higher-mode region to the
+    fundamental plateau, then drifts/collapses in the late background-or-noise tail."""
+    lo_hi = float(tau[-1]) / ratio
+    lo_grid = np.logspace(np.log10(2 * DT), np.log10(lo_hi), n_scan)
+    a_grid = np.array([_alpha_on_window(tau, R, lo, ratio * lo) for lo in lo_grid])
+    return lo_grid, a_grid
+
+
+def _alpha_fund(lo_grid, a_grid, band=(0.8, 2.5)):
+    """Robust fundamental |alpha|: median of alpha(lo) over the self-consistent
+    band lo*|alpha| in [band] decay times. Excludes the tiny-lo higher-mode spike
+    (product < band lo) and the large-lo background where |alpha| -> 0 (product
+    small again), so it is stable even on the noisy low-k 1M sweeps."""
+    prod = lo_grid * np.abs(a_grid)
+    sel = np.isfinite(a_grid) & (prod >= band[0]) & (prod <= band[1])
+    return float(np.nanmedian(a_grid[sel])) if sel.any() else np.nan
+
+
+def plateau_window(label, width_decay=3.0, ratio=4.0, rtol=0.10, sweep=None,
+                   verbose=False):
+    """Principled fundamental-mode fit window [lo, hi] for one k.
+
+    Two robust steps on the ACDC pair-correlation R(tau): (1) a self-consistent
+    band median (_alpha_fund) fixes the fundamental decay constant -- this is
+    stable even when statistics smear the plateau; (2) the window START is the
+    EARLIEST lag whose alpha(lo) is within rtol of that reference (best statistics
+    among acceptable starts -- the user's "earliest point on the plateau"), so a
+    near-critical k whose higher modes die early gets the earlier window it
+    deserves. The window spans width_decay fundamental decay times. The mode-
+    settling time is a geometry property, so the window is SHARED by every method.
+
+    Returns lo, hi, alpha (the in-window fit), tau_decay, lo_grid/alpha_grid
+    (diagnostics) and i_lo (picked scan index).
+    """
+    if sweep is None:
+        sweep = gl.load_sweep(label)
+    n_r, n_th = sweep["G"].shape
+    F = fission_coarse_sim(label, n_r, n_th)
+    tau, R = acdc_rossi(sweep, F, n_tau=N_T - 1)        # full available lag range
+    lo_grid, a_grid = plateau_scan(tau, R, ratio=ratio, n_scan=40)
+
+    a_fund = _alpha_fund(lo_grid, a_grid)
+    if not np.isfinite(a_fund):                          # degenerate -> generous fit
+        a_fund = _alpha_on_window(tau, R, 2 * DT, float(tau[-1])) or -1000.0
+    tau_d = 1.0 / abs(a_fund)
+
+    # earliest lag within rtol of the fundamental reference (median-smoothed to
+    # ignore single-bin jitter); fall back to ~1 decay time.
+    rel = np.abs(_median3(a_grid) - a_fund) / abs(a_fund)
+    # the fundamental cannot dominate before ~half a decay time (higher modes are
+    # still present), so floor the onset search at 0.5 tau_d.
+    eligible = lo_grid >= 0.5 * tau_d
+    near = np.isfinite(rel) & (rel < rtol) & eligible
+    sustained = near.copy()
+    sustained[:-1] &= near[1:]                            # require two consecutive (no jitter entry)
+    i_lo = (int(np.argmax(sustained)) if sustained.any()
+            else int(np.argmax(near)) if near.any()
+            else int(np.argmin(np.abs(lo_grid - tau_d))))
+    lo = float(lo_grid[i_lo])
+    hi = float(min(lo + width_decay * tau_d, float(tau[-1])))
+    alpha = _alpha_on_window(tau, R, lo, hi)
+    if not (np.isfinite(alpha) and alpha < 0):
+        alpha = a_fund
+    if verbose:
+        print(f"k{label}: tau_d={tau_d:.2e}s  start={lo/tau_d:.2f} tau_d  "
+              f"window=[{lo:.2e}, {hi:.2e}]  alpha={alpha:.0f}  (a_fund={a_fund:.0f})")
+    return {"label": label, "lo": lo, "hi": hi, "alpha": alpha,
+            "tau_decay": tau_d, "lo_grid": lo_grid, "alpha_grid": a_grid,
+            "i_lo": i_lo, "alpha_fund": a_fund}
+
+
+def compute_fit_windows(labels=None, **kw):
+    """Run plateau_window over the k grid -> {label: (lo, hi)} (the cached
+    FIT_WINDOWS). Print a copy-pasteable dict literal."""
+    labels = labels or list(FIT_WINDOWS)
+    out = {}
+    for lab in labels:
+        try:
+            r = plateau_window(lab, verbose=True, **kw)
+            out[lab] = (round(r["lo"], 7), round(r["hi"], 7))
+        except (FileNotFoundError, KeyError) as e:
+            print(f"k{lab}: skipped ({type(e).__name__}: {e})")
+    print("\nFIT_WINDOWS = {")
+    for lab, (lo, hi) in out.items():
+        print(f'    "{lab}": ({lo:.7g}, {hi:.7g}),')
+    print("}")
+    return out
 
 
 def alignment_gate(label: str, verbose: bool = True) -> dict:
     """BF-vs-ACDC absolute overlay (with M_SIM), shape flatness, and same-window
-    alpha agreement at full statistics."""
+    alpha agreement at full statistics.
+
+    Both R(tau) are built over the FULL lag range (n_tau = N_T-1 -> [0, 10 ms]) so
+    every method's fit window is covered by both estimators -- at k098 the window
+    reaches 10 ms and the default 256-bin ACDC curve would silently truncate the
+    binned fit to [2, 5] ms while the BF MLE used the whole window (the fairness
+    invariant would break in that one panel).
+    """
     sweep = gl.load_sweep(label)
     n_r, n_th = sweep["G"].shape
     F = fission_coarse_sim(label, n_r, n_th)
-    tau, R_acdc = acdc_rossi(sweep, F)
+    tau, R_acdc = acdc_rossi(sweep, F, n_tau=N_T - 1)
 
     df = load_chain_events(label)
-    tau_bf, R_bf, counts = bf_rossi(df, N_SOURCE_BF)
+    tau_bf, R_bf, counts = bf_rossi(df, N_SOURCE_BF, n_tau=N_T - 1)
     assert np.allclose(tau, tau_bf)
 
     # shape test over the full usable range (skip lag bins 0-1), scale test = sum ratio
@@ -980,6 +1332,20 @@ def alignment_gate(label: str, verbose: bool = True) -> dict:
     popt, perr = fit_alpha_binned(tau[fitw], R_acdc[fitw])
     a_ac, s_ac = popt[2], perr[2]
 
+    # Coarse-rebinned BF overlay for display: at low k the per-fine-bin pair count is
+    # 1-2, so the raw R_bf dots collapse onto quantization stripes (rows at count/N/dt).
+    # Rebin the lag axis to target ~>= 5 expected pairs/bin (factor set from the window
+    # pair density) and carry Poisson counting errors so the overlay reads honestly.
+    win_bins = max(int(round((hi - lo) / DT)), 1)
+    per_bin = n_pairs / win_bins
+    rebin = int(np.clip(np.ceil(5.0 / max(per_bin, 1e-9)), 1, 64))
+    n_keep = (len(counts) // rebin) * rebin
+    c_re = counts[:n_keep].reshape(-1, rebin).sum(axis=1).astype(float)
+    tau_re = tau[:n_keep].reshape(-1, rebin).mean(axis=1)
+    dt_re = rebin * DT
+    R_bf_re = c_re / N_SOURCE_BF / dt_re
+    R_bf_re_err = np.sqrt(c_re) / N_SOURCE_BF / dt_re
+
     agree = abs(a_bf - a_ac) / np.hypot(s_bf, s_ac) if np.isfinite(s_bf) else np.nan
     result = {
         "label": label, "n_pairs_window": int(n_pairs),
@@ -989,6 +1355,8 @@ def alignment_gate(label: str, verbose: bool = True) -> dict:
         "alpha_acdc": float(a_ac), "alpha_acdc_err": float(s_ac),
         "alpha_nsigma": float(agree),
         "tau": tau, "R_acdc": R_acdc, "R_bf": R_bf, "counts_bf": counts,
+        "rebin": rebin, "tau_bf_rebin": tau_re,
+        "R_bf_rebin": R_bf_re, "R_bf_rebin_err": R_bf_re_err,
     }
     if verbose:
         print(f"k{label}: window pairs={n_pairs:6d}  scale={scale:5.3f}  "
@@ -1011,11 +1379,12 @@ def alignment_gate(label: str, verbose: bool = True) -> dict:
 # is the efficiency ratio.
 # --------------------------------------------------------------------------- #
 
-# Flagship deep-dive case (matched 10M-history sphere + per-cell sweep).
+# Flagship deep-dive case (matched 100M-history sphere + per-cell sweep at k=0.90).
 FLAGSHIP_LABEL = "090"
-FLAGSHIP_DOUBLES_TRACK = RESULTS_ROOT / "greens-function-k090-bench10M" / "collision_track.h5"
-FLAGSHIP_SWEEP_EVENTS = RESULTS_ROOT / "greens-sweep-k090-bench10M-events.h5"
-FLAGSHIP_SWEEP_NPZ = RESULTS_ROOT / "greens-sweep-k090-bench10M.npz"
+FLAGSHIP_DOUBLES_DIR = RESULTS_ROOT / "greens-function-k090-bench100M"
+FLAGSHIP_DOUBLES_TRACK = FLAGSHIP_DOUBLES_DIR / "collision_track.h5"
+FLAGSHIP_SWEEP_EVENTS = RESULTS_ROOT / "greens-sweep-k090-bench100M-events.h5"
+FLAGSHIP_SWEEP_NPZ = RESULTS_ROOT / "greens-sweep-k090-bench100M.npz"
 
 # Method display names (transparent "Doubles" terminology, per user).
 METHOD_LABELS = {
@@ -1028,9 +1397,11 @@ METHOD_LABELS = {
 
 
 def budget_ladder(n_total: int, n_min: float = 3e4, n_points: int = 10,
-                  min_blocks: int = 3) -> np.ndarray:
+                  min_blocks: int = 5) -> np.ndarray:
     """Log-spaced total-history budgets from n_min up to n_total // min_blocks
-    (so every budget still affords >= min_blocks disjoint realizations)."""
+    (so every budget still affords >= min_blocks disjoint realizations). min_blocks=5
+    caps the ladder top so no budget yields the 3-4-block std-of-std stragglers that
+    used to dominate the right edge of the master curves."""
     n_max = max(int(n_total // min_blocks), int(n_min))
     grid = np.logspace(np.log10(n_min), np.log10(n_max), n_points)
     return np.unique(np.round(grid).astype(int))
@@ -1053,19 +1424,27 @@ def _disjoint_blocks(parent_ids: np.ndarray, n_prime: int, n_total: int,
 
 
 def oracle_block_alphas(df: pd.DataFrame, n_prime: int, n_total: int, fit_window,
-                        max_blocks: int | None = None):
+                        max_blocks: int | None = None, w_fixed: float | None = None):
     """Per-realization Doubles (parent-ID) alpha at budget n_prime + window-pair
     counts. Blocks below MIN_PAIRS_FIT window pairs contribute no alpha (the
-    starvation that IS the result)."""
+    starvation that IS the result).
+
+    Per-block fits FREEZE the delayed-branch flat-floor weight at w_fixed (the
+    full-dataset flat_background_weight, computed here when not supplied): a
+    floated per-block w at a few hundred pairs is ill-conditioned and splices
+    two estimators into the sigma(N) curve (see fit_alpha_mle 'auto' caveat).
+    w0's residual uncertainty is a common systematic, not per-block spread."""
     lo, hi = fit_window
     t, p = df["time"].to_numpy(), df["parent_id"].to_numpy()
+    if w_fixed is None:
+        w_fixed = flat_background_weight(same_parent_pair_dts(t, p, hi), lo, hi)
     alphas, counts = [], []
     for sel in _disjoint_blocks(p, n_prime, n_total, max_blocks):
         dts = same_parent_pair_dts(t[sel], p[sel], hi)
         dts = dts[(dts >= lo) & (dts <= hi)]
         counts.append(len(dts))
         if len(dts) >= MIN_PAIRS_FIT:
-            a, _, _ = fit_alpha_mle(dts, lo, hi, background="auto")
+            a, _, _ = fit_alpha_mle(dts, lo, hi, background="fixed", w_fixed=w_fixed)
             if np.isfinite(a) and a < 0:
                 alphas.append(a)
     return np.array(alphas), np.array(counts)
@@ -1074,38 +1453,66 @@ def oracle_block_alphas(df: pd.DataFrame, n_prime: int, n_total: int, fit_window
 def realistic_block_alphas(df: pd.DataFrame, n_prime: int, n_total: int,
                            fit_window, rng=None, max_blocks: int | None = None):
     """Per-realization Doubles (realistic) alpha: each block stationarized to its
-    own optimal steady-source rate, all-pairs + flat-background MLE (no oracle)."""
+    own optimal steady-source rate, all-pairs + flat-background MLE (no oracle).
+
+    counts holds the block's SAME-CHAIN (correlated) window-pair count, and a block
+    is convergent only when that clears MIN_PAIRS_FIT -- a dataset-validity gate, not
+    an oracle the estimator uses (it still fits the blind all-pairs stream). Gating on
+    the all-pairs count would never censor (accidentals dominate), so a pair-starved
+    block would contribute a lucky, biased alpha (the survivor bias sigma_vs_budget's
+    frac_convergent gate then removes at the budget level).
+
+    The accidental-floor weight w0 is FIXED per block from OBSERVABLES ONLY --
+    expected accidental window pairs n_det^2 (hi-lo)/T_w over the pairs actually
+    counted -- exactly how a real Rossi-alpha analysis pins its accidental floor
+    from the measured singles rate. Floating w per block instead is
+    ill-conditioned and leaks background variance into alpha (see fit_alpha_mle);
+    w0's residual uncertainty is a common systematic, not per-block spread."""
     rng = np.random.default_rng(rng)
     lo, hi = fit_window
     t, p = df["time"].to_numpy(), df["parent_id"].to_numpy()
     alphas, counts = [], []
     for sel in _disjoint_blocks(p, n_prime, n_total, max_blocks):
+        dts_sc = same_parent_pair_dts(t[sel], p[sel], hi)
+        n_corr = int(((dts_sc >= lo) & (dts_sc <= hi)).sum())
+        counts.append(n_corr)
+        if n_corr < MIN_PAIRS_FIT:
+            continue
         sub = pd.DataFrame({"time": t[sel], "parent_id": p[sel]})
-        if len(sub) < 2:
-            counts.append(len(sub))
-            continue
         sr = optimal_source_rate(sub, n_prime, fit_window)
-        if not np.isfinite(sr) or sr <= 0:   # no window pairs -> no realistic measurement
-            counts.append(0)
+        if not np.isfinite(sr) or sr <= 0:
             continue
-        sh = stationarize(sub, n_prime / sr, rng)
+        t_w = n_prime / sr
+        sh = stationarize(sub, t_w, rng)
         dts = all_pairs_dts(np.sort(sh["time"].to_numpy()), hi)
-        a, _, n = fit_alpha_mle(dts, lo, hi, background="flat")
-        counts.append(int(n))
-        if n >= MIN_PAIRS_FIT and np.isfinite(a) and a < 0:
+        n_win = int(((dts >= lo) & (dts <= hi)).sum())
+        if n_win == 0:
+            continue
+        acc = len(sub) ** 2 * (hi - lo) / t_w          # expected accidental pairs
+        w0 = float(np.clip(acc / n_win, 0.0, 1.0 - 1e-6))
+        if w0 >= 0.999:                                # signal fraction unresolvable
+            continue
+        a, _, _ = fit_alpha_mle(dts, lo, hi, background="fixed", w_fixed=w0)
+        if np.isfinite(a) and a < 0:
             alphas.append(a)
     return np.array(alphas), np.array(counts)
 
 
 def die_block_alphas(df: pd.DataFrame, n_prime: int, n_total: int, fit_window,
-                     max_blocks: int | None = None):
-    """Per-realization die-away (singles envelope) alpha + window-singles counts."""
+                     max_blocks: int | None = None, w_fixed: float | None = None):
+    """Per-realization die-away (singles envelope) alpha + window-singles counts.
+
+    Same frozen-background policy as the Doubles blocks (uniformity): the
+    delayed-pedestal weight w0 comes from one full-dataset flat fit of the
+    singles times and is frozen into every 1-D block fit."""
     lo, hi = fit_window
     t, p = df["time"].to_numpy(), df["parent_id"].to_numpy()
+    if w_fixed is None:
+        w_fixed = flat_background_weight(t, lo, hi)
     alphas, counts = [], []
     for sel in _disjoint_blocks(p, n_prime, n_total, max_blocks):
         ts = t[sel]
-        a, _, n = fit_alpha_mle(ts, lo, hi, background="flat")
+        a, _, n = fit_alpha_mle(ts, lo, hi, background="fixed", w_fixed=w_fixed)
         counts.append(int(((ts >= lo) & (ts <= hi)).sum()))
         if np.isfinite(a) and a < 0:
             alphas.append(a)
@@ -1121,6 +1528,7 @@ def acdc_block_alphas(events: dict, F_flat: np.ndarray, n_prime: int,
     lo, hi = fit_window
     n_per = max(int(n_prime // n_cells), 1)
     time_edges = np.linspace(0.0, T_MAX, N_T + 1)
+    n_lag = window_lag_count(fit_window)     # lag range sized by the window (k098!)
     alphas, counts = [], []
     n_blocks = int(n_source_cell // n_per)
     if max_blocks is not None:
@@ -1133,7 +1541,7 @@ def acdc_block_alphas(events: dict, F_flat: np.ndarray, n_prime: int,
                 ev_b[idx] = (t[m], p[m])
                 cnt += int(m.sum())
         counts.append(cnt)
-        tau, R = acdc_rossi_events(ev_b, F_flat, n_per, time_edges)
+        tau, R = acdc_rossi_events(ev_b, F_flat, n_per, time_edges, n_tau=n_lag)
         w = (tau >= lo) & (tau <= hi)
         if np.any(R[w] > 0):
             try:
@@ -1146,37 +1554,71 @@ def acdc_block_alphas(events: dict, F_flat: np.ndarray, n_prime: int,
 
 
 def sigma_vs_budget(block_fn, budgets, n_total: int,
-                    min_blocks_for_sigma: int = 3) -> pd.DataFrame:
+                    min_blocks_for_sigma: int = 5,
+                    min_frac_convergent: float = 0.8) -> pd.DataFrame:
     """Drive any *_block_alphas over a budget ladder -> across-realization sigma.
 
-    block_fn(n_prime) -> (alphas, counts). sigma = std of the per-realization
-    alphas (needs >= min_blocks_for_sigma convergent blocks, else censored).
-    Columns: n_prime, alpha, sigma, n_blocks, n_convergent, mean_count, censored.
+    block_fn(n_prime) -> (alphas, counts), where counts holds the per-block window
+    pair/singles count and len(counts) = blocks actually drawn. sigma = std of the
+    per-realization alphas. A budget is CENSORED (sigma = nan) unless it clears BOTH:
+      * n_convergent >= min_blocks_for_sigma  -- enough realizations for a std, and
+      * frac_convergent >= min_frac_convergent -- most drawn blocks actually measured.
+    The second gate removes the survivor-bias artifact: at a pair-starved budget only
+    a lucky, pair-rich minority of blocks fit, and the std over that biased subset is
+    not the true spread (it also drove the nonsense free slope). Requiring the bulk of
+    blocks to succeed keeps only budgets where the method genuinely measures.
+    Columns: n_prime, alpha, sigma, sigma_err, n_blocks, n_blocks_drawn,
+    n_convergent, frac_convergent, mean_count, censored.
     """
     rows = []
     for n_prime in budgets:
         alphas, counts = block_fn(int(n_prime))
         n_conv = len(alphas)
+        n_drawn = len(counts)
+        frac = n_conv / n_drawn if n_drawn else 0.0
+        ok = n_conv >= min_blocks_for_sigma and frac >= min_frac_convergent
+        sigma = float(np.std(alphas, ddof=1)) if ok else np.nan
+        # sampling error of a sample std from n_conv iid realizations: SE(s) ~=
+        # s / sqrt(2(n_conv-1)). This IS the "std-of-std" that makes the master
+        # curve look noisy when n_conv is small (few blocks at high budget); it is
+        # plotted as the error bar so the curve shows where it is trustworthy.
+        sigma_err = (sigma / np.sqrt(2 * (n_conv - 1))
+                     if np.isfinite(sigma) and n_conv > 1 else np.nan)
         rows.append({
             "n_prime": int(n_prime),
             "alpha": float(np.mean(alphas)) if n_conv else np.nan,
-            "sigma": float(np.std(alphas, ddof=1)) if n_conv >= min_blocks_for_sigma else np.nan,
+            "sigma": sigma,
+            "sigma_err": sigma_err,
             "n_blocks": int(n_total // n_prime),
+            "n_blocks_drawn": n_drawn,
             "n_convergent": n_conv,
-            "mean_count": float(np.mean(counts)) if len(counts) else np.nan,
-            "censored": n_conv < min_blocks_for_sigma,
+            "frac_convergent": float(frac),
+            "mean_count": float(np.mean(counts)) if n_drawn else np.nan,
+            "censored": not ok,
         })
     return pd.DataFrame(rows)
 
 
-def fit_sigma_scaling(budget_df: pd.DataFrame, tol: float = 0.15) -> dict:
-    """Fit log(sigma) = intercept + slope*log(N) on the measured rows.
+def fit_sigma_scaling(budget_df: pd.DataFrame, alpha_ref: float | None = None,
+                      rel_cap: float = 0.5, tol: float = 0.15) -> dict:
+    """Fit log(sigma) = intercept + slope*log(N) on the MEASURING-regime rows.
+
+    Measuring regime = non-censored budgets whose sigma is below rel_cap*|alpha_ref|
+    (points above that are not measurements -- a near-critical sigma/|alpha| ~ 3 would
+    drag a log-log slope arbitrarily). With alpha_ref None the cap is off (all sigma>0
+    non-censored rows), used only for quick diagnostics. This one slope is BOTH the
+    printed slope and the master-curve annotation -- there is no second, differently
+    filtered refit inside the figure.
 
     slope_ok gates extrapolation: the 1/sqrt(N) law requires slope ~ -0.5
     (|slope + 0.5| < tol). Returns slope, intercept, slope_ok, n_points.
     """
     d = budget_df.dropna(subset=["sigma"])
     d = d[d["sigma"] > 0]
+    if "censored" in d:
+        d = d[~d["censored"]]
+    if alpha_ref is not None:
+        d = d[d["sigma"] < rel_cap * abs(alpha_ref)]
     if len(d) < 2:
         return {"slope": np.nan, "intercept": np.nan, "slope_ok": False,
                 "n_points": int(len(d))}
@@ -1205,7 +1647,7 @@ def histories_to_target(budget_df: pd.DataFrame, alpha_ref: float,
     scaling (the free-slope fit) is returned as a diagnostic, not a gate.
     """
     if scaling is None:
-        scaling = fit_sigma_scaling(budget_df)
+        scaling = fit_sigma_scaling(budget_df, alpha_ref)
     sig_target = target * abs(alpha_ref)
     d = budget_df.dropna(subset=["sigma"])
     d = d[(d["sigma"] > 0) & (~d["censored"])]
@@ -1297,16 +1739,20 @@ def sigma_crosscheck(df: pd.DataFrame, n_prime: int, n_total: int, fit_window,
       across : std of per-realization alpha over disjoint blocks (headline)
       boot   : chain bootstrap of one block
       fisher : mean MLE asymptotic (observed-Fisher) sigma over blocks.
+    All three use the SAME frozen full-dataset background weight w0 (kappa_boot
+    must compare like with like — the master-curve blocks fit at fixed w0, so a
+    bootstrap that refloats w would measure a different estimator's spread).
     """
     lo, hi = fit_window
     t, p = df["time"].to_numpy(), df["parent_id"].to_numpy()
+    w0 = flat_background_weight(same_parent_pair_dts(t, p, hi), lo, hi)
     block_alphas, fishers = [], []
     first_block = None
     for sel in _disjoint_blocks(p, n_prime, n_total):
         dts = same_parent_pair_dts(t[sel], p[sel], hi)
         dts = dts[(dts >= lo) & (dts <= hi)]
         if len(dts) >= MIN_PAIRS_FIT:
-            a, s, _ = fit_alpha_mle(dts, lo, hi, background="auto")
+            a, s, _ = fit_alpha_mle(dts, lo, hi, background="fixed", w_fixed=w0)
             if np.isfinite(a):
                 block_alphas.append(a)
                 if np.isfinite(s):
@@ -1319,7 +1765,7 @@ def sigma_crosscheck(df: pd.DataFrame, n_prime: int, n_total: int, fit_window,
         b = bootstrap_chains(
             first_block, lambda d: fit_alpha_mle(
                 same_parent_pair_dts(d["time"].to_numpy(), d["parent_id"].to_numpy(), hi),
-                lo, hi, background="auto")[0],
+                lo, hi, background="fixed", w_fixed=w0)[0],
             n_boot=n_boot, rng=rng)
         b = b[np.isfinite(b)]
         boot = float(np.std(b)) if len(b) >= 10 else np.nan
@@ -1370,6 +1816,10 @@ def doubles_count_vs_gap(gaps, label: str = "090", n_subset: int = N_SOURCE_BF) 
 
 if __name__ == "__main__":
     import sys
+    if "--fit-windows" in sys.argv:
+        labs = [a for a in sys.argv[1:] if not a.startswith("--")] or list(FIT_WINDOWS)
+        compute_fit_windows(labs)
+        sys.exit(0)
     labels = sys.argv[1:] or ["098", "090", "070", "040"]
     print(f"Phase-0 alignment gate (M_SIM={M_SIM}): absolute overlay + late-window alpha")
     results = [alignment_gate(lbl) for lbl in labels]
