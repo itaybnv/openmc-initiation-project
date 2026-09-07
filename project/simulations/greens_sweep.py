@@ -16,6 +16,19 @@ the Rossi/ACDC correlated-pair formula R(tau) = sum_i F_i * integral g_i(t) g_i(
 Run one k_eff:   python -m project.simulations.greens_sweep 098 [n_r n_theta N]
 Output:          project/results/greens-sweep-k<label>.npz
 
+RECORD-LENGTH DESIGN RULE (--t-max):
+The per-cell g_i(t) record must extend at least ~3 prompt decay times BEYOND the
+upper edge of the intended Rossi fit window. The ACDC overlap integral at lag tau
+only sees the part of the record where both g_i(t) and g_i(t+tau) exist, so a
+finite record of length T_MAX suppresses R(tau) by the factor
+    1 - exp(-2 |alpha| (T_MAX - tau)),
+which droops the assembled R(tau) below truth as tau approaches T_MAX. The 10 ms
+default is ample for k <= 0.95 (suppression < 1e-4 inside the window), but at
+k = 0.98 (alpha ~ -370 /s, decay time ~2.7 ms) the window reaches ~9.5 ms and the
+record must be ~40 ms -- see outputs/presentation/K098_EXTENSION_REPORT.md.
+`--t-max` keeps the bin width fixed at DT = 1e-2/512 s and scales the bin count,
+so a 40 ms record gives 2048 bins bit-compatible with the k=0.98 extension npz.
+
 Optional cross-check (--tally-gt): in the SAME run, also measure g_i(t) with a
 native CellFilter x TimeFilter absorption tally (stored as `g_t_tally` in the
 npz, per source neutron). This does NOT replace the collision_track g_i(t) that
@@ -44,9 +57,12 @@ N_R_COARSE = 8
 N_TH_COARSE = 10
 N_PARTICLES = 120_000
 
-# time-histogram config for g_i(t) (prompt window)
-T_MAX = 1.0e-2          # 10 ms covers the prompt decay (~2.6 ms)
+# time-histogram config for g_i(t) (prompt window). DT is the INVARIANT: --t-max
+# scales the bin count so every record shares the same bin width (and so a longer
+# record stays bin-compatible with the standard 10 ms one).
+T_MAX = 1.0e-2          # 10 ms covers the prompt decay (~2.6 ms) for k <= 0.95
 N_T = 512
+DT = T_MAX / N_T        # 19.53125 us
 
 # Tally analogue of the collision_track reactions=[101] detection: B-10 has no
 # fission, so 'absorption' in the detector cell == the (n,a)+(n,g) capture rate.
@@ -127,6 +143,13 @@ def parse_args(argv=None):
     p.add_argument("n", nargs="?", type=int, default=N_PARTICLES)
     p.add_argument("--gap", type=float, default=10.0,
                    help="core-surface-to-detector gap [cm] (detector center at R+gap+5)")
+    p.add_argument("--t-max", type=float, default=T_MAX, dest="t_max",
+                   help="per-cell g_i(t) record length [s] (default 1e-2). The bin "
+                        "width is held at DT = 1e-2/512 s and the bin count scales, "
+                        "so 4e-2 gives 2048 bins. Design rule: the record must reach "
+                        "~3 prompt decay times past the top of the intended Rossi fit "
+                        "window (40 ms at k=0.98) or the g*g overlap integral is "
+                        "suppressed by 1 - exp(-2|alpha|(T_MAX - tau)).")
     p.add_argument("--save-events", action="store_true",
                    help="save raw per-cell detection events (time, parent_id, delayed_group) "
                         "to <out>-events.h5 for chain-level error analysis")
@@ -149,7 +172,9 @@ if __name__ == "__main__":
 
     target_k = [k for k, v in KEFF_CONFIGS.items() if v["label"] == f"k{label}"][0]
     R = KEFF_CONFIGS[target_k]["radius"]
-    time_edges = np.linspace(0.0, T_MAX, N_T + 1)
+    t_max = float(args.t_max)
+    n_t = int(round(t_max / DT))          # bin width pinned to DT (see design rule)
+    time_edges = np.linspace(0.0, n_t * DT, n_t + 1)
     r_edges, cos_edges = coarse_edges(R, n_r, n_th)
 
     cells = (
@@ -165,8 +190,8 @@ if __name__ == "__main__":
     dist = np.zeros((n_r, n_th))
     r_mid = np.zeros((n_r, n_th))
     cos_mid = np.zeros((n_r, n_th))
-    g_t = np.zeros((n_r, n_th, N_T))
-    g_t_tally = np.zeros((n_r, n_th, N_T))   # native tally g_i(t), per source neutron
+    g_t = np.zeros((n_r, n_th, n_t))
+    g_t_tally = np.zeros((n_r, n_th, n_t))   # native tally g_i(t), per source neutron
     transport_s = np.zeros((n_r, n_th))
     total_s = np.zeros((n_r, n_th))
 
@@ -175,6 +200,8 @@ if __name__ == "__main__":
 
     print(f"Sweep k={target_k} R={R} gap={args.gap} grid {n_r}x{n_th}, "
           f"{len(cells)} cell(s), N={n:,}/cell")
+    print(f"  g_i(t) record: T_MAX={n_t * DT * 1e3:.3f} ms in {n_t} bins "
+          f"(dt={DT * 1e6:.5f} us)")
     for ir, ith in cells:
         res = run_one(
             R, label, ir, ith,

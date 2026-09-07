@@ -247,6 +247,17 @@ def rossi(sweep: dict, F_coarse: np.ndarray, tau_max: float = 1e-2, n_tau: int =
 
     g_i(t) is the per-source detection rate in cell i (sweep g_t / n_source). Returns
     tau_centers, R_tau.
+
+    LAG AXIS: the discrete lag-L autocorrelation sum_a p_a p_{a+L}/dt estimates R at
+    tau = L*dt, NOT at (L-0.5)*dt -- overlapping the two bin-integrated histograms
+    offset by L bins is a TRIANGULAR smear of half-width dt CENTRED on L*dt (the
+    first-order terms cancel, so it is second-order accurate: for a pure exponential
+    the ratio to R(L*dt) is (2/x) tanh(x/2) = 1 - x^2/12 + ... with x = alpha*dt,
+    i.e. 0.99993 at k=0.90).
+    The returned tau_centers are therefore L*dt. (Labelling them (L-0.5)*dt, as this
+    function used to, shifted the whole curve by half a bin and biased any absolute
+    comparison against a correctly-labelled estimator by exp(|alpha| dt/2) -- first
+    order in alpha*dt, ~1.5% at k=0.90.)
     """
     g_t = sweep["g_t"].astype(np.float64)           # (n_r, n_th, N_T) counts
     n = float(sweep["n_source"])
@@ -254,7 +265,7 @@ def rossi(sweep: dict, F_coarse: np.ndarray, tau_max: float = 1e-2, n_tau: int =
     dt = time_edges[1] - time_edges[0]
     n_t = g_t.shape[-1]
     n_lag = min(n_tau, n_t - 1)
-    tau_centers = (np.arange(1, n_lag + 1) - 0.5) * dt
+    tau_centers = np.arange(1, n_lag + 1) * dt
 
     R_tau = np.zeros(n_lag)
     n_r, n_th = g_t.shape[:2]

@@ -120,15 +120,28 @@ def same_parent_pair_hist(times, parents, lag_edges) -> np.ndarray:
 def bf_rossi(df: pd.DataFrame, n_source: int, tau_max: float = T_MAX, n_tau: int = 256):
     """Absolute BF R(tau): same-parent pairs / source neutron / second of lag.
 
-    Lag bins [(L-1)dt, L*dt) labeled (L-0.5)dt — the same labeling greens_loader.rossi
-    uses for discrete lag L, so the two curves overlay bin-for-bin. (Discrete
-    autocorrelation smears pairs triangularly within +-dt of L*dt; second-order
-    for alpha*dt << 1 — skip the first two bins in fits/overlays.)
+    Lag bin L = [(L-0.5)dt, (L+0.5)dt), labelled tau = L*dt, so BOTH estimators
+    report R at the SAME tau grid tau_L = L*dt as greens_loader.rossi does for its
+    discrete lag L, and the two curves overlay bin-for-bin:
+      * BF   = box average of R over a bin CENTRED on L*dt,
+      * ACDC = triangular smear of half-width dt CENTRED on L*dt.
+    Both are second-order accurate; for a pure exponential BF/R = sinh(x/2)/(x/2)
+    and ACDC/R = (2/x) tanh(x/2) with x = alpha*dt, so they differ only by
+    x^2/8 -- 1.1e-4 at k=0.90, 1.1e-3 at k=0.70, 5.3e-3 at the steepest k=0.40 --
+    and the overlay is a genuine absolute-scale test. (Previously the bins were
+    [(L-1)dt, L*dt) labelled (L-0.5)dt while ACDC labelled its lag-L value
+    (L-0.5)dt too — matching labels, but the ACDC point actually sits at L*dt,
+    i.e. half a bin later, which biased the scale ratio by exp(|alpha| dt/2).)
+
+    Pairs with separation < 0.5*dt now fall below the first bin edge and are no
+    longer histogrammed; they used to land in the L=1 bin, which every fit and
+    overlay already skips (alignment_gate's scale sum starts at L=3, and every
+    FIT_WINDOWS lower edge is far later still).
     """
     dt = DT
-    lag_edges = np.arange(0, n_tau + 1) * dt
+    lag_edges = (np.arange(0, n_tau + 1) + 0.5) * dt
     counts = same_parent_pair_hist(df["time"].to_numpy(), df["parent_id"].to_numpy(), lag_edges)
-    tau_centers = (np.arange(1, n_tau + 1) - 0.5) * dt
+    tau_centers = np.arange(1, n_tau + 1) * dt
     R = counts / n_source / dt
     return tau_centers, R, counts
 
@@ -436,7 +449,7 @@ def acdc_rossi_events(events_by_cell: dict, F_flat: np.ndarray, n_source_cell: i
     dt = time_edges[1] - time_edges[0]
     n_t = len(time_edges) - 1
     n_lag = min(n_tau, n_t - 1)
-    tau_centers = (np.arange(1, n_lag + 1) - 0.5) * dt
+    tau_centers = np.arange(1, n_lag + 1) * dt   # lag L estimates R at tau = L*dt
     R = np.zeros(n_lag)
     N = float(n_source_cell)
     for idx, (t, par) in events_by_cell.items():
@@ -1320,8 +1333,10 @@ def alignment_gate(label: str, verbose: bool = True) -> dict:
     tau_bf, R_bf, counts = bf_rossi(df, N_SOURCE_BF, n_tau=N_T - 1)
     assert np.allclose(tau, tau_bf)
 
-    # shape test over the full usable range (skip lag bins 0-1), scale test = sum ratio
-    full = (tau >= 2 * DT) & (R_acdc > 0)
+    # shape test over the full usable range (skip lag bins 0-1), scale test = sum ratio.
+    # tau is now labelled L*dt (was (L-0.5)*dt), so "skip lag bins 0-1" = L >= 3 is the
+    # threshold tau >= 3*DT -- keeping the summed lag set identical to the old axis.
+    full = (tau >= 3 * DT) & (R_acdc > 0)
     scale = R_bf[full].sum() / R_acdc[full].sum()
     M_emp, M_err = calibrate_moment(label, n_boot=200)
 
