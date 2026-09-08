@@ -57,7 +57,7 @@ SPHERE_TRACK = SPHERE_DIR / "collision_track.h5"
 N_SPHERE = 10_000_000               # statepoint n_particles of the bench10M sphere run
 
 OUT_DIR = Path(__file__).resolve().parent / "outputs" / "k098_extension"
-PRESENT_DIR = Path(__file__).resolve().parent / "outputs" / "presentation"
+PRESENT_DIR = Path(__file__).resolve().parent / "outputs" / "presentation" / "shared" / "assets"
 WINDOW_JSON = OUT_DIR / "ext_window.json"
 
 
