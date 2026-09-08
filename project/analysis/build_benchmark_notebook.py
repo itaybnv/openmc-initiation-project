@@ -269,9 +269,21 @@ shape ratio scale$/(M_{emp}/M_{sim})$ is $0.984\pm0.004$ ($3.9\sigma$ from 1), a
 constants are $\alpha_{ACDC}=-360.9\pm1.7$ against $\alpha_{BF}=-369.2\pm1.2$, i.e. **3.9$\sigma$
 apart**, with the assembled curve decaying ~2% too slowly. The *same-sign* residual on the
 $k=0.90$ 100M flagship is only $0.7\sigma$ (shape ratio $0.9949\pm0.0072$) and $1.3\sigma$ on the
-alpha pair, so this is a near-critical effect, not a global bias. A diagnostic separating
-estimator asymmetry from a genuine time-structure difference is in progress; nothing in the cost
-comparison below depends on its outcome, because both methods are compared on their own
+alpha pair, so this is a near-critical effect, not a global bias.
+
+**That residual is now diagnosed** (`GATE_DIAGNOSTICS_REPORT.md`). With identical baseline handling
+on both curves the alpha gap is $0.5\%$ ($2\sigma$): $1.7\%$ of the quoted $2.2\%$ was the two fits
+choosing different flat baselines (the assembly's LSQ floats $A=-0.2\%$, the pair MLE freezes
+$w_0=+1.2\%$, at a measured leverage of $-474$ s$^{-1}$ per unit floor fraction). The remaining
+$1.5\%$ amplitude residual lives entirely in the in-record vs beyond-record split of the pair
+weight ($55.09\%$ of the measured pairs fall at $\tau\le40$ ms against $55.95\%$ for the assembly),
+while the union of the 80 cell runs reproduces the sphere run's pairs to $0.2\%$, and coarsening
+the assembly grid on the 1M $20\times20$ sweep drives the shape ratio monotonically down (0.977,
+0.973, 0.963, 0.949 for $20\times20$, $4\times5$, $2\times5$, $1\times1$). That makes it the
+within-cell weighting error of the assembly grid (the pair source $\propto F\,G^2$ sits deeper in a
+cell than the uniform cell average, and deeper birth points carry a larger delayed-branch share);
+the zero-cost fix to test next is a fission-weighted in-cell source for the confined runs. Nothing
+in the cost comparison below depends on any of it, because both methods are compared on their own
 $\sigma_\alpha$ scaling, not on their agreement.
 """))
     cells.append(code(r"""
@@ -444,6 +456,13 @@ higher-mode tail at mid $k$ (at $k=0.90$: window-fit 1535 vs fundamental 1433 vs
 *overstated* the PK departure (up to +27%) — kept only to make that window systematic visible
 (`PK_DEPARTURE_AUDIT.md`). The Doubles markers simply stop existing at low $k$ — that
 absence is the result. The rest of the notebook quantifies the **cost** behind these markers.
+
+**Source of the $k=0.98$ high-stats ACDC alpha.** It is read from whichever dataset §2c resolves
+to (the 100M flagship record and its official $[1.5744, 9.7717]$ ms window when that campaign is on
+disk, the bench10M 40 ms rebuild otherwise), through §2c's own plug-in estimator. The cell below
+prints the value and the dataset it came from, so these breadth panels and the near-critical
+section can no longer quote two different $k=0.98$ alphas (they did: $-370.7$ here against
+$-360.9$ there).
 """))
     cells.append(code(r"""
 # k=0.98 rows use the extended-record window / 40 ms assembly grid (record-extension
@@ -453,10 +472,28 @@ bench = pd.DataFrame([(kre.benchmark_row_ext(n_boot=60, rng=20 + i) if L == "098
                       for i, L in enumerate(LABELS)])
 bench = bench.sort_values("k").reset_index(drop=True)
 
-# high-stats ACDC truth per k (for the PK-departure systematic); k=0.98 from the
-# extended record (-370.7-class value; the 10 ms-record consensus -336 is superseded)
-acdc_best = {L: (kre.acdc_alpha_sigma_ext() if L == "098" else rb.acdc_alpha_sigma(L))
-             for L in LABELS}
+# high-stats ACDC truth per k (for the PK-departure systematic). k=0.98 comes from
+# whichever dataset §2c uses -- the SAME fk98.resolve_dataset selection -- so the
+# breadth panels and the near-critical section quote one k=0.98 alpha. Before this
+# (K098_100M_REPORT loose end) these panels read the bench10M extended-record
+# consensus (-370.7) while §2c measured -360.9 on the 100M flagship.
+acdc_best = {L: rb.acdc_alpha_sigma(L) for L in LABELS if L != "098"}
+DS98_BREADTH = fk98.resolve_dataset("bench100M", "bench10M")
+if DS98_BREADTH == "bench10M":
+    acdc_best["098"] = kre.acdc_alpha_sigma_ext()
+    A98_SOURCE = "bench10M extended 40 ms record (kre.acdc_alpha_sigma_ext)"
+else:
+    _i98 = fk98.inputs(DS98_BREADTH)
+    _w98 = fk98.window(DS98_BREADTH)["window"]
+    # fk98._acdc_plugin is exactly §2c's ACDC estimator (plug-in assembly on the
+    # dataset's own grid, Poisson bootstrap x KAPPA_S), legacy F as there.
+    _a98, _s98, _ = fk98._acdc_plugin(_i98, _i98["F_sim"], _w98, n_boot=100, rng=98)
+    acdc_best["098"] = (float(_a98), float(_s98), int(_i98["n_sweep_total"]))
+    A98_SOURCE = (f"{DS98_BREADTH} flagship, {_i98['n_sweep_total']:,}-history sweep, "
+                  f"window [{_w98[0]*1e3:.4f}, {_w98[1]*1e3:.4f}] ms (as in §2c)")
+print(f"k=0.98 high-stats ACDC alpha for the breadth panels: {acdc_best['098'][0]:.2f} "
+      f"+/- {acdc_best['098'][1]:.2f} s^-1   [source: {A98_SOURCE}]")
+
 bench["acdc_hi"] = [acdc_best[L][0] for L in bench["label"]]
 bench["acdc_hi_err"] = [acdc_best[L][1] for L in bench["label"]]
 
@@ -989,8 +1026,21 @@ scale$/(M_{emp}/M_{sim})$ is $0.984\pm0.004$, $3.9\sigma$ from 1. Both say the s
 same sign: the assembled ACDC curve decays about 2% too slowly and sits about 1.5% high. A
 17-window scan puts $\alpha_{ACDC}$ above $\alpha_{BF}$ on every window tried, so this is not a
 window artifact. The same-sign residual on the $k=0.90$ 100M flagship is $1.3\sigma$ on the alpha
-pair and $0.7\sigma$ on the shape ratio, so it is a near-critical effect; a diagnostic separating
-estimator asymmetry from a genuine time-structure difference is in progress. **The cost comparison
+pair and $0.7\sigma$ on the shape ratio, so it is a near-critical effect.
+
+**And it is now diagnosed** (`GATE_DIAGNOSTICS_REPORT.md`, printed under the cell below). Put both
+curves through identical baseline handling and the alpha gap is $0.5\%$ ($2\sigma$, $-364.8$ against
+$-366.8$ s$^{-1}$ with each floor pinned at its own measured level): $1.7\%$ of the $2.2\%$ above is
+the two fits choosing different flat baselines, at a leverage of $-474$ s$^{-1}$ per unit floor
+fraction. The $1.5\%$ amplitude residual that survives is the in-record vs beyond-record split of
+the pair weight ($55.09\%$ of the measured pairs at $\tau\le40$ ms against $55.95\%$ for the
+assembly), not a transport or a statistics difference: the union of the 80 cell runs reproduces the
+sphere run's pairs to $0.2\%$, and coarsening the assembly grid on the 1M $20\times20$ sweep drives
+the shape ratio monotonically down (0.977, 0.973, 0.963, 0.949 for $20\times20$, $4\times5$,
+$2\times5$, $1\times1$). So the residual is the within-cell weighting error of the assembly grid,
+whose pair source $\propto F\,G^2$ sits deeper in a cell than the uniform cell average while deeper
+birth points carry a larger delayed-branch share, and the zero-cost fix to test next is a
+fission-weighted in-cell source for the confined runs. **The cost comparison
 below is unaffected**: each method's $N\to5\%$ comes from its own $\sigma_\alpha(N)$ scaling, which
 does not use the two estimators' agreement.
 
@@ -1045,8 +1095,19 @@ for which, v in g98["by_F"].items():
 print(f"      {g98['n_pairs_mask']:,} Doubles pairs in the L>=3 mask, "
       f"{g98['n_chains_detected']:,} detected chains")
 print("      the alpha pair and the shape ratio are the same ~2% residual seen twice, "
-      "same sign; at k=0.90 (100M) the equivalents are 1.3 sigma and 0.7 sigma. "
-      "Diagnostic of estimator asymmetry vs time-structure difference in progress.")
+      "same sign; at k=0.90 (100M) the equivalents are 1.3 sigma and 0.7 sigma.")
+print("      DIAGNOSED (GATE_DIAGNOSTICS_REPORT.md): with identical baseline handling on both "
+      "curves the alpha gap is 0.5% (2 sigma), i.e. 1.7% of the 2.2% above was the two fits "
+      "choosing different flat baselines (leverage -474 s^-1 per unit floor fraction).")
+print("      The 1.5% amplitude residual is the in-record vs beyond-record split of the pair "
+      "weight (55.09% of measured pairs at tau <= 40 ms vs 55.95% for the assembly): the union "
+      "of the 80 cell runs reproduces the sphere pairs to 0.2%, and coarsening the assembly "
+      "grid on the 1M 20x20 sweep drives the shape ratio down 0.977 / 0.973 / 0.963 / 0.949 "
+      "for 20x20 / 4x5 / 2x5 / 1x1.")
+print("      So it is the within-cell weighting error of the assembly grid (pair source ~ F G^2 "
+      "sits deeper than the uniform cell average; deeper birth points carry a larger "
+      "delayed-branch share); the zero-cost fix to test next is a fission-weighted in-cell "
+      "source for the confined runs.")
 
 # cost ladders + band + split-sample errors, one call (rb.cost_summary_flagship's
 # recipe on this dataset; the ACDC block fn gets the dataset's own time grid).
@@ -1449,10 +1510,20 @@ print("efficiency ratio N_Doubles(realistic)/N_ACDC by k:",
   $\alpha_{BF}=-369.2\pm1.2$ is $3.9\sigma$, and the window-free shape ratio
   scale$/(M_{emp}/M_{sim})=0.984\pm0.004$ says the same thing with the same sign: the assembled
   curve decays about 2% too slowly. At $k=0.90$ and the same 100M budget the equivalents are
-  $1.3\sigma$ and $0.7\sigma$, so it is a near-critical residual, not a global bias, and a
-  diagnostic separating estimator asymmetry from a real time-structure difference is in progress.
-  The cost conclusions do not depend on it: each method's $N\to5\%$ is fitted from its own
-  $\sigma_\alpha(N)$.
+  $1.3\sigma$ and $0.7\sigma$, so it is a near-critical residual, not a global bias.
+* **What that residual turned out to be** (`GATE_DIAGNOSTICS_REPORT.md`). Handle the baseline
+  identically on both curves and the alpha gap is $0.5\%$ ($2\sigma$), so $1.7\%$ of the $2.2\%$
+  above was the two fits choosing different flat baselines rather than the two curves disagreeing.
+  The $1.5\%$ amplitude residual that remains lives entirely in the in-record vs beyond-record
+  split of the pair weight ($55.09\%$ of the measured pairs at $\tau\le40$ ms against $55.95\%$ for
+  the assembly), and it is not transport or statistics: the union of the 80 cell runs reproduces
+  the sphere run's pairs to $0.2\%$, while coarsening the assembly grid on the 1M $20\times20$
+  sweep drives the shape ratio monotonically down (0.977, 0.973, 0.963, 0.949 for $20\times20$,
+  $4\times5$, $2\times5$, $1\times1$). It is therefore the within-cell weighting error of the
+  assembly grid, whose pair source $\propto F\,G^2$ sits deeper in a cell than the uniform cell
+  average while deeper birth points carry a larger delayed-branch share; the zero-cost fix to test
+  next is a fission-weighted in-cell source for the confined runs, and the cost conclusions do not
+  depend on any of it, because each method's $N\to5\%$ is fitted from its own $\sigma_\alpha(N)$.
 * **The Doubles method literally has no result in the starved regimes** because the fit window
   never reaches 50 same-chain pairs (pairs $\propto\varepsilon^2\!\times$mult, dying as $\sim d^{-4}$
   with distance and collapsing at low $k$). We draw that boundary, we don't assert it.
@@ -1503,7 +1574,13 @@ print(f"  k=0.98 estimator agreement ({DS98}): alpha ACDC {a98['acdc']:.1f} +/- 
       f"{g98['by_F']['matched']['shape_ratio']:.3f} +/- "
       f"{g98['by_F']['matched']['shape_ratio_err']:.3f} "
       f"({g98['by_F']['matched']['shape_nsigma']:.1f} sigma from 1). Same-sign residual at "
-      f"k=0.90 (100M) is 1.3 / 0.7 sigma; diagnostic in progress.")
+      f"k=0.90 (100M) is 1.3 / 0.7 sigma.")
+print("  k=0.98 residual, diagnosed (GATE_DIAGNOSTICS_REPORT.md): 1.7% of the 2.2% alpha gap "
+      "was the two fits' different flat baselines (like-for-like gap 0.5%, 2 sigma); the "
+      "1.5% amplitude residual is the in-record vs beyond-record pair-weight split (55.09% vs "
+      "55.95% at tau <= 40 ms), i.e. the within-cell weighting error of the assembly grid "
+      "(shape ratio 0.977 / 0.973 / 0.963 / 0.949 as the grid coarsens 20x20 -> 1x1). Fix to "
+      "test next: a fission-weighted in-cell source for the confined runs.")
 print("  efficiency ratio N_Doubles(realistic)/N_ACDC by k (INDICATIVE, §3 basis):")
 rk_sum = cost_k["N_realistic"] / cost_k["N_acdc"]
 for k, r in zip(cost_k["k"], rk_sum):
