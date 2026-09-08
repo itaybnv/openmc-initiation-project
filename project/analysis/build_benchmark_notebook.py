@@ -260,6 +260,19 @@ high-precision (40M sweep) $k$ values, clipped to the signal band. Exception: th
 panel uses the matched bench10M pair on the **extended 40 ms record** — the 10 ms histogram
 record truncated the assembled $R(\tau)$ at late lag (scale ratio read 1.04; on the untruncated
 record it is ~1.01). See `K098_EXTENSION_REPORT.md`.
+
+**What the 100M flagship records say about this gate (measured in §2c).** The four panels below are
+the 10M-tier record, where this gate passes at every $k$. On the 100M campaigns the error bars
+shrink by $\sqrt{10}$ and a residual appears at $k=0.98$ that the 10M data could not resolve:
+the absolute scale is $0.9874\pm0.0040$ (matched fission map, $3.2\sigma$ from unity), the
+shape ratio scale$/(M_{emp}/M_{sim})$ is $0.984\pm0.004$ ($3.9\sigma$ from 1), and the two decay
+constants are $\alpha_{ACDC}=-360.9\pm1.7$ against $\alpha_{BF}=-369.2\pm1.2$, i.e. **3.9$\sigma$
+apart**, with the assembled curve decaying ~2% too slowly. The *same-sign* residual on the
+$k=0.90$ 100M flagship is only $0.7\sigma$ (shape ratio $0.9949\pm0.0072$) and $1.3\sigma$ on the
+alpha pair, so this is a near-critical effect, not a global bias. A diagnostic separating
+estimator asymmetry from a genuine time-structure difference is in progress; nothing in the cost
+comparison below depends on its outcome, because both methods are compared on their own
+$\sigma_\alpha$ scaling, not on their agreement.
 """))
     cells.append(code(r"""
 # k=0.98 gate on the extended 40 ms record (record-extension fix, see
@@ -962,6 +975,25 @@ time grid, the fit window and the fission map from whichever dataset is on disk:
 is available, and otherwise the bench10M 40 ms rebuild. The cell prints which one it used, and
 every number in this section is from that dataset.
 
+**Window and reference.** The fit window is derived from the dataset in use by the same plateau
+rule, not carried over: on the 100M flagship that gives the **official $k=0.98$ window
+$[1.5744,\,9.7717]$ ms** (against $[1.3655,\,9.5096]$ ms on the 10M record, a shift of 11 and 13 lag
+bins), and the cost ladders use $\alpha_{ref}=-360.94$, the ACDC plug-in alpha on that window.
+Both are printed below. The window choice is not what drives anything here: between the two windows
+$\alpha_{ACDC}$ moves 0.28% and $\alpha_{BF}$ 0.37%, both under 1% of $\alpha$.
+
+**Honest statement of the $k=0.98$ estimator agreement at 100M.** On the official window the two
+estimators are $\alpha_{ACDC}=-360.9\pm1.7$ and $\alpha_{BF}=-369.2\pm1.2$, **3.9$\sigma$ apart**;
+the absolute-scale gate reads $0.9874\pm0.0040$ on the matched fission map and the shape ratio
+scale$/(M_{emp}/M_{sim})$ is $0.984\pm0.004$, $3.9\sigma$ from 1. Both say the same thing with the
+same sign: the assembled ACDC curve decays about 2% too slowly and sits about 1.5% high. A
+17-window scan puts $\alpha_{ACDC}$ above $\alpha_{BF}$ on every window tried, so this is not a
+window artifact. The same-sign residual on the $k=0.90$ 100M flagship is $1.3\sigma$ on the alpha
+pair and $0.7\sigma$ on the shape ratio, so it is a near-critical effect; a diagnostic separating
+estimator asymmetry from a genuine time-structure difference is in progress. **The cost comparison
+below is unaffected**: each method's $N\to5\%$ comes from its own $\sigma_\alpha(N)$ scaling, which
+does not use the two estimators' agreement.
+
 **Retraction of the previous $k=0.98$ headline.** This section used to report ACDC reaching 5% at
 **104.8k histories** and a **8.2x** advantage over the parent-ID Doubles. Both rested on a single
 ladder point: the single-anchor rule anchored on the 1.25M budget, which had only **7** convergent
@@ -969,8 +1001,11 @@ blocks, and whose $\sigma$ came out a factor 3.1 below the $-1/2$ line through i
 $P=0.004$ (1-in-270) downward fluctuation that the rule then squares. Sliding either neighbouring
 budget alone gives 8.6e5 and 9.8e5, the 6-point band gives 1.03e6, and five independent 2M splits
 give 1.03e6 $\pm$ 0.11e6, so the anchor was low by a factor of 10. On the band the ordering at
-$k=0.98$ **reverses**: ACDC needs roughly 2.3 times *more* histories than the parent-ID Doubles
-oracle here, not 8.2 times fewer. Full derivation in `COST_ESTIMATOR_REPORT.md` §5b.
+$k=0.98$ **reverses**: ACDC needs roughly 2.0 times *more* histories than the parent-ID Doubles
+oracle here, not 8.2 times fewer. Full derivation in `COST_ESTIMATOR_REPORT.md` §5b. (That
+derivation was made on the 10M record, where the band read 2.3 times and had to extrapolate 2.1x
+past its top budget; on the 100M record every target sits inside its own band range, so nothing
+extrapolates, and the factor settles at 2.0.)
 """))
     cells.append(code(r"""
 # k=0.98 through project.analysis.flagship_k098: dataset selection, then the same
@@ -987,16 +1022,35 @@ print(f"k=0.98 DATASET IN USE: {DS98}   sweep={inp98['paths']['sweep_npz'].name}
       f"sphere {inp98['n_sphere']:,} histories")
 
 w98d = fk98.window(DS98); win98 = w98d["window"]
-a98 = fk98.alphas(DS98, win98, n_boot=60, rng=7)
-print(f"window = [{win98[0]*1e3:.4f}, {win98[1]*1e3:.4f}] ms  (plateau rule on this "
-      f"dataset; vetted extended-record window "
+a98 = fk98.alphas(DS98, win98, n_boot=200, rng=7)
+print(f"OFFICIAL k=0.98 WINDOW = [{win98[0]*1e3:.4f}, {win98[1]*1e3:.4f}] ms  "
+      f"(plateau rule on this dataset; vetted extended-record window "
       f"[{fk98.VETTED_EXT_WINDOW[0]*1e3:.4f}, {fk98.VETTED_EXT_WINDOW[1]*1e3:.4f}])")
 print(f"alpha: ACDC {a98['acdc']:.1f} +/- {a98['acdc_sigma']:.1f}   "
       f"Doubles (parent-ID) {a98['bf']:.1f} +/- {a98['bf_sigma']:.1f}   "
-      f"agree to {a98['nsigma']:.2f} sigma")
+      f"PK {a98['pk']:.1f} +/- {a98['pk_err']:.1f}   "
+      f"ACDC vs Doubles: {a98['nsigma']:.2f} sigma apart")
+
+# The absolute-scale gate on the SAME dataset and window: the honest companion to
+# the alpha pair above. Both fission maps are reported; the matched map is this
+# campaign's own tally and is the headline, the legacy 1M tally is the map the
+# published gate used. shape_ratio = scale/(M_emp/M_SIM) is 1 when the assembled
+# TIME STRUCTURE is right and the only residual is the pair moment.
+g98 = fk98.gate(DS98, win98, n_boot=200, rng=7)
+for which, v in g98["by_F"].items():
+    print(f"gate  F={which:8s}  scale Doubles/ACDC = {v['scale']:.4f}   "
+          f"M_emp = {v['M_emp']:.4f} +/- {v['M_err']:.4f}   "
+          f"scale/(M_emp/M_SIM) = {v['shape_ratio']:.4f} +/- {v['shape_ratio_err']:.4f}  "
+          f"({v['shape_nsigma']:.2f} sigma from 1)")
+print(f"      {g98['n_pairs_mask']:,} Doubles pairs in the L>=3 mask, "
+      f"{g98['n_chains_detected']:,} detected chains")
+print("      the alpha pair and the shape ratio are the same ~2% residual seen twice, "
+      "same sign; at k=0.90 (100M) the equivalents are 1.3 sigma and 0.7 sigma. "
+      "Diagnostic of estimator asymmetry vs time-structure difference in progress.")
 
 # cost ladders + band + split-sample errors, one call (rb.cost_summary_flagship's
-# recipe on this dataset; the ACDC block fn gets the dataset's own time grid)
+# recipe on this dataset; the ACDC block fn gets the dataset's own time grid).
+# alpha_ref is the ACDC plug-in alpha on the official window above.
 c98 = fk98.costs(DS98, win98, alpha_ref=a98["acdc"], verbose=False)
 cur98, band98, h2t98, aref98 = c98["curves"], c98["band"], c98["anchor"], c98["alpha_ref"]
 sca98 = {m: rb.fit_sigma_scaling(c, aref98) for m, c in cur98.items()}
@@ -1007,7 +1061,9 @@ n_sph98 = inp98["n_sphere"]
 fig, ax = plt.subplots(figsize=(8.5, 6.2))
 draw_master_curve(ax, cur98, sca98, h2t98, aref98, band=band98)
 ax.set_title(f"Master cost curve — $k$={gl.K_OF_LABEL[FL98]:.2f}, gap 10 cm "
-             f"({DS98}: matched {fmt_N(n_sph98)} histories)")
+             f"({DS98}: matched {fmt_N(n_sph98)} histories)\n"
+             f"window [{win98[0]*1e3:.4f}, {win98[1]*1e3:.4f}] ms, "
+             rf"$\alpha_{{ref}}$ = {aref98:.2f} s$^{{-1}}$", fontsize=11)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "master_sigma_vs_N_k098.png")
 plt.show()
@@ -1029,10 +1085,12 @@ if band98["oracle"]["ok"] and band98["acdc"]["ok"]:
     se = float(summ98[c98["n_splits"]].loc["ratio_oracle_acdc", "se_full"])
     print(f"\nN(Doubles parent-ID) / N(ACDC) = {r98o:.2f} +/- {se:.2f}  "
           f"({'ACDC' if r98o >= 1 else 'Doubles (parent-ID)'} cheaper here)")
+    a_ns = float(summ98[c98["n_splits"]].loc["anchor_acdc", "n_sigma_vs_full"])
     print(f"RETRACTED: the single-anchor rule reads {r98o_anchor:.1f}x on the same "
           f"ladders (previously published as 8.2x with ACDC at 104.8k). Its ACDC anchor "
-          f"sits on a 7-block budget whose sigma is a 1-in-270 downward fluctuation; "
-          f"the band and five independent splits both give ~1.03e6. "
+          f"sits on one thin ladder point whose sigma is a downward fluctuation, and its "
+          f"own {c98['n_splits']}-split mean is {a_ns:.1f} sigma from its full-data value; "
+          f"the band's is {float(summ98[c98['n_splits']].loc['n_target_acdc', 'n_sigma_vs_full']):.1f} sigma. "
           f"COST_ESTIMATOR_REPORT.md §5b.")
 """))
 
@@ -1320,8 +1378,8 @@ and singles as $\varepsilon$, so the ratio grows as $d^2$ and ACDC's advantage w
 bound as the detector moves away. The **$k$** trend is directional only. In particular, the
 previous claim that the ratio "narrows toward critical but never crosses 1" is **withdrawn**: at
 $k=0.98$ the band estimator (§2c) puts the parent-ID Doubles oracle *below* ACDC by a factor
-$\approx2.3$, reversing the sign of the near-critical comparison that the single-anchor rule
-reported. Whether the realistic (chain-blind) Doubles also crosses near critical is not settled by
+$\approx2.0$ on the 100M flagship record, reversing the sign of the near-critical comparison that
+the single-anchor rule reported. Whether the realistic (chain-blind) Doubles also crosses near critical is not settled by
 this dataset: its band is the one method that fails the split-vs-full consistency check at both
 $k$. Below $k\approx0.85$ the Doubles method simply has no result, and that boundary is robust:
 it is a pair count, not an extrapolation. (The right panel's $d^2$ geometric scaling
@@ -1381,11 +1439,20 @@ print("efficiency ratio N_Doubles(realistic)/N_ACDC by k:",
   pair method left. (Pulsed die-away* is cheapest of all where it applies, but it is a singles
   method that needs a pulsable source.)
 * **Near critical the ordering reverses, and the old claim that it never does is withdrawn.** At
-  $k=0.98$ the band estimator puts ACDC at roughly 2.3 times the parent-ID Doubles oracle's
+  $k=0.98$ the band estimator puts ACDC at roughly 2.0 times the parent-ID Doubles oracle's
   histories, not 8.2 times fewer (§2c): the published 8.2x rested on one 7-block ladder point whose
   $\sigma$ was a 1-in-270 downward fluctuation. That is the expected direction, since near critical
   pairs are abundant and the Doubles method's $\varepsilon^2$ penalty is at its mildest. The
   statement that survives is about the *starved* regime, not about all $k$.
+* **At $k=0.98$ and 100M the two estimators no longer agree to within their errors, and that is
+  reported rather than smoothed over.** $\alpha_{ACDC}=-360.9\pm1.7$ against
+  $\alpha_{BF}=-369.2\pm1.2$ is $3.9\sigma$, and the window-free shape ratio
+  scale$/(M_{emp}/M_{sim})=0.984\pm0.004$ says the same thing with the same sign: the assembled
+  curve decays about 2% too slowly. At $k=0.90$ and the same 100M budget the equivalents are
+  $1.3\sigma$ and $0.7\sigma$, so it is a near-critical residual, not a global bias, and a
+  diagnostic separating estimator asymmetry from a real time-structure difference is in progress.
+  The cost conclusions do not depend on it: each method's $N\to5\%$ is fitted from its own
+  $\sigma_\alpha(N)$.
 * **The Doubles method literally has no result in the starved regimes** because the fit window
   never reaches 50 same-chain pairs (pairs $\propto\varepsilon^2\!\times$mult, dying as $\sim d^{-4}$
   with distance and collapsing at low $k$). We draw that boundary, we don't assert it.
@@ -1430,6 +1497,13 @@ if band98["oracle"]["ok"] and band98["acdc"]["ok"]:
     r98o = band98["oracle"]["n_target"] / band98["acdc"]["n_target"]
     print(f"  k=0.98: parent-ID Doubles / ACDC = {r98o:.2f}x  "
           f"({'Doubles' if r98o < 1 else 'ACDC'} cheaper)  <- REVERSES the retracted 8.2x")
+print(f"  k=0.98 estimator agreement ({DS98}): alpha ACDC {a98['acdc']:.1f} +/- "
+      f"{a98['acdc_sigma']:.1f} vs Doubles {a98['bf']:.1f} +/- {a98['bf_sigma']:.1f} "
+      f"= {a98['nsigma']:.1f} sigma apart; shape ratio "
+      f"{g98['by_F']['matched']['shape_ratio']:.3f} +/- "
+      f"{g98['by_F']['matched']['shape_ratio_err']:.3f} "
+      f"({g98['by_F']['matched']['shape_nsigma']:.1f} sigma from 1). Same-sign residual at "
+      f"k=0.90 (100M) is 1.3 / 0.7 sigma; diagnostic in progress.")
 print("  efficiency ratio N_Doubles(realistic)/N_ACDC by k (INDICATIVE, §3 basis):")
 rk_sum = cost_k["N_realistic"] / cost_k["N_acdc"]
 for k, r in zip(cost_k["k"], rk_sum):
