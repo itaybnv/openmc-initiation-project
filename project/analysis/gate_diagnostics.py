@@ -43,7 +43,7 @@ import project.analysis.rossi_benchmark as rb
 
 DT = rb.DT
 OUT_DIR = Path(__file__).resolve().parent / "outputs" / "gate_diagnostics"
-DATASETS = ("bench100M", "k090_bench100M")
+DATASETS = ("bench100M", "k090_bench100M", "bench100M_fw")
 
 # Fraction of the record where the prompt term is dead and only the delayed /
 # accidental floor survives: [LATE_FRAC * T, T].  0.375 gives [15, 40] ms at

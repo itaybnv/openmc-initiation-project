@@ -50,7 +50,7 @@ from project.core.materials import detector_material, mixture_material
 from project.core.physics_config import detector_max_collisions
 from project.core.rossi_mesh import KEFF_CONFIGS
 from project.core.simulation import Simulation
-from project.core.sources import confined_cell_source
+from project.core.sources import confined_cell_source, fission_weighted_cell_source
 
 # coarse sweep grid + statistics (overridable via argv)
 N_R_COARSE = 8
@@ -75,8 +75,28 @@ def coarse_edges(R: float, n_r: int, n_th: int):
     return r_edges, cos_edges
 
 
+def radial_fission_density(sphere_dir: Path):
+    """Fine radial fission density rho(r) from a uniform-pulse sphere run.
+
+    Reads the `fission_per_cell` mesh tally (flat index i_theta*N_RADIAL + i_r),
+    sums over theta and divides by the fine-shell volume (equal-volume shells, so
+    this is a constant). Returns (r_fine_edges, rho_fine) with rho in
+    fissions / source / cm^3; only its shape matters for the source weighting.
+    """
+    from project.core.rossi_mesh import N_RADIAL, N_THETA
+
+    with openmc.StatePoint(str(Path(sphere_dir) / "statepoint.1.h5")) as sp:
+        t = sp.get_tally(name="fission_per_cell")
+        mesh = t.find_filter(openmc.MeshFilter).mesh
+        r_fine_edges = np.asarray(mesh.r_grid, float)
+        F_fine = t.mean.flatten().reshape(N_THETA, N_RADIAL)
+    F_r = F_fine.sum(axis=0)
+    vol = 4 * np.pi / 3 * np.diff(r_fine_edges**3)
+    return r_fine_edges, F_r / vol
+
+
 def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10.0,
-            tally_gt=False):
+            tally_gt=False, fission_weight=None):
     det_z = R + gap + 5.0  # detector CENTER on +Z (gap to surface + detector radius)
     geometry = core_with_detector(
         core_center=(0.0, 0.0, 0.0), core_radius=R,
@@ -88,7 +108,11 @@ def run_one(R, label, ir, ith, r_lo, r_hi, cos_lo, cos_hi, n, time_edges, gap=10
             "max_collisions": detector_max_collisions(n), "reactions": [101],
             "cell_ids": [DETECTOR_CELL_ID],
         },
-        "source": confined_cell_source(r_lo, r_hi, cos_lo, cos_hi),
+        "source": (
+            confined_cell_source(r_lo, r_hi, cos_lo, cos_hi)
+            if fission_weight is None
+            else fission_weighted_cell_source(r_lo, r_hi, cos_lo, cos_hi, *fission_weight)
+        ),
     }
     sim = Simulation(
         materials=openmc.Materials([mixture_material, detector_material]),
@@ -159,6 +183,13 @@ def parse_args(argv=None):
                         "collision_track g_i(t); does not change the collision method")
     p.add_argument("--cells", nargs="*", default=None, metavar="IR,ITH",
                    help="run only these coarse cells (e.g. --cells 7,0 7,9 0,0)")
+    p.add_argument("--fission-weighted", default=None, metavar="SPHERE_DIR",
+                   dest="fission_weighted",
+                   help="sample the in-cell birth RADIUS from the fission map of this "
+                        "uniform-pulse sphere run (results dir name, e.g. "
+                        "greens-function-k098-bench100M) instead of uniformly in "
+                        "volume; angle stays uniform. Tests the B8 within-cell "
+                        "weighting diagnosis of the k=0.98 1.5%% residual")
     p.add_argument("--tag", default="",
                    help="extra output-name suffix (e.g. -gap10 to avoid clobbering "
                         "an existing default-name npz with a different grid/budget)")
@@ -176,6 +207,16 @@ if __name__ == "__main__":
     n_t = int(round(t_max / DT))          # bin width pinned to DT (see design rule)
     time_edges = np.linspace(0.0, n_t * DT, n_t + 1)
     r_edges, cos_edges = coarse_edges(R, n_r, n_th)
+
+    fission_weight = None
+    if args.fission_weighted:
+        sphere_dir = Path(__file__).parent.parent / "results" / args.fission_weighted
+        fission_weight = radial_fission_density(sphere_dir)
+        r_fine, rho = fission_weight
+        if not np.allclose(r_fine[::len(r_fine) // n_r][: n_r + 1], r_edges):
+            raise SystemExit("fine fission mesh does not nest on the coarse sweep grid")
+        print(f"  fission-weighted in-cell source from {sphere_dir.name}: "
+              f"rho(0)/rho(R) = {rho[0] / rho[-1]:.2f}")
 
     cells = (
         [(ir, ith) for ir in range(n_r) for ith in range(n_th)]
@@ -207,6 +248,7 @@ if __name__ == "__main__":
             R, label, ir, ith,
             r_edges[ir], r_edges[ir + 1], cos_edges[ith + 1], cos_edges[ith],
             n, time_edges, gap=args.gap, tally_gt=args.tally_gt,
+            fission_weight=fission_weight,
         )
         G[ir, ith] = res["n_prompt"] / n
         G_err[ir, ith] = G[ir, ith] / np.sqrt(max(res["n_prompt"], 1))
@@ -246,6 +288,8 @@ if __name__ == "__main__":
             G=G, G_err=G_err, n_prompt=n_prompt, n_total=n_total,
             dist=dist, r_mid=r_mid, cos_mid=cos_mid, g_t=g_t,
             g_t_tally=g_t_tally, transport_s=transport_s, total_s=total_s,
+            fission_weighted=(args.fission_weighted or ""),
+            rho_r_fine=(fission_weight[1] if fission_weight else np.zeros(0)),
         )
         print(f"Saved -> {out}  (near/far G ratio ~ {G[-1,0]/max(G[-1,-1],1e-12):.1f})")
         print(f"  total transport {transport_s.sum():.1f}s, total wall {total_s.sum():.1f}s")

@@ -82,6 +82,18 @@ DATASETS = {
         "ref_window": VETTED_EXT_WINDOW,
         "ref_alpha_fund": VETTED_EXT_ALPHA_FUND,
     },
+    "bench100M_fw": {
+        # Same 100M sphere run and same window as bench100M; the sweep re-run with
+        # the FISSION-WEIGHTED in-cell source (greens_sweep --fission-weighted),
+        # the zero-transport-cost test of the B8 within-cell weighting diagnosis.
+        "sweep_npz": RESULTS / "greens-sweep-k098-bench100M-fw.npz",
+        "events": RESULTS / "greens-sweep-k098-bench100M-fw-events.h5",
+        "sphere_dir": RESULTS / "greens-function-k098-bench100M",
+        "label": "098",
+        "fit_window": (0.001574388607451278, 0.009771681902370625),  # bench100M official window, frozen
+        "ref_window": VETTED_EXT_WINDOW,
+        "ref_alpha_fund": VETTED_EXT_ALPHA_FUND,
+    },
     "bench10M": {
         "sweep_npz": kre.EXT_NPZ,          # 40 ms rebuild of the 10 ms bench10M sweep
         "events": kre.EVENTS_H5,
@@ -106,7 +118,7 @@ DEFAULT_DATASET = "bench100M"
 
 # Finest split count that still leaves every split >= rb.BAND_MIN_POINTS band points
 # (COST_ESTIMATOR_REPORT sections 2-3: 10 x 10M at 100M, 5 x 2M at 10M).
-DEFAULT_N_SPLITS = {"bench100M": 10, "bench10M": 5, "k090_bench100M": 10}
+DEFAULT_N_SPLITS = {"bench100M": 10, "bench100M_fw": 10, "bench10M": 5, "k090_bench100M": 10}
 
 # Which fission map weights the ACDC assembly in the alignment-gate statistic.
 #   "legacy"  = rb.fission_coarse_sim(LABEL) -- the legacy label-keyed 1M tally that
