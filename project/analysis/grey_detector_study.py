@@ -511,6 +511,7 @@ def stage_figure():
         o = np.argsort(xs)
         return np.array(xs)[o], np.array(ys)[o], np.array(es)[o], np.array(cens)[o]
 
+    censored = []
     for table, key, col, mk, lab in ((sph, "oracle", CRIMSON, "s", "pair counting (parent-ID doubles)"),
                                      (sph, "realistic", ORANGE, "d", "pair counting (blind doubles)"),
                                      (swp, "acdc_analog", BLUE, "o", "assembly, analog captures"),
@@ -519,8 +520,7 @@ def stage_figure():
             continue
         x, y, e, c = series(table, key)
         ax.errorbar(x[~c], y[~c], yerr=e[~c], fmt=mk + "-", color=col, ms=6, lw=1.2, capsize=2, label=lab)
-        if c.any():
-            ax.plot(x[c], np.full(c.sum(), ax.get_ylim()[1] if ax.get_ylim()[1] > 1 else 1e9), "x", color=col)
+        censored.append((x[c], col))
         # predicted curves through the black point: pairs ~ eps^-2 (pair rate);
         # analog assembly ~ 1/<w>; tally assembly ~ <w^2>/<w>^2 (single-neutron
         # variance, from the sphere weights; saturates in the thin limit)
@@ -536,6 +536,13 @@ def stage_figure():
                 o = np.argsort(px)
                 ax.plot(px[o], py[o], ":", color=col, lw=0.9, alpha=0.7)
     ax.set_xscale("log"); ax.set_yscale("log")
+    # censored points: no asymptotic band at any budget up to the full record
+    ytop = ax.get_ylim()[1] * 1.6
+    for i_c, (xc, col) in enumerate(censored):
+        if len(xc):
+            ax.plot(xc, np.full(len(xc), ytop * 1.25**i_c), "x", color=col, ms=6, mew=1.4,
+                    label="no result at 100M" if i_c == 0 else None)
+    ax.set_ylim(top=ytop * 1.25**max(len(censored) - 1, 0) * 1.8)
     ax.set_xlabel("detector efficiency relative to black")
     ax.set_ylabel("histories to σ_α = 5 %")
     ax.set_title("k = 0.90, fixed geometry: cost vs efficiency", color=INK, fontsize=11)
