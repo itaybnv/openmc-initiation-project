@@ -273,6 +273,11 @@ if __name__ == "__main__":
             grp.create_dataset("time", data=a["time"])
             grp.create_dataset("parent_id", data=a["parent_id"])
             grp.create_dataset("delayed_group", data=a["delayed_group"])
+            # capture energy + position + direction (added 2026-10 for the
+            # grey-detector reweighting; older event files lack these)
+            grp.create_dataset("E", data=a["E"])
+            grp.create_dataset("r", data=np.stack([a["r"]["x"], a["r"]["y"], a["r"]["z"]], 1))
+            grp.create_dataset("u", data=np.stack([a["u"]["x"], a["u"]["y"], a["u"]["z"]], 1))
             grp.attrs["n_source"] = n
 
     if events_file is not None:

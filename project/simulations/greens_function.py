@@ -29,7 +29,7 @@ from pathlib import Path
 import openmc
 
 from project.core.geometry import core_with_detector
-from project.core.materials import detector_material, mixture_material
+from project.core.materials import BLACK_B10_DENSITY, detector_material_b10, mixture_material
 from project.core.physics_config import detector_settings
 from project.core.rossi_mesh import KEFF_CONFIGS, make_fission_mesh
 from project.core.simulation import Simulation
@@ -59,6 +59,10 @@ if __name__ == "__main__":
     parser.add_argument("--particles", type=int, default=1_000_000)
     parser.add_argument("--gap", type=float, default=10.0,
                         help="core-surface-to-detector gap [cm] (detector center at R+gap+5)")
+    parser.add_argument("--b10-density", type=float, default=BLACK_B10_DENSITY, dest="b10",
+                        help="detector B-10 number density [atom/b-cm]; 100 = the black "
+                             "detector of the benchmark; ~1e-5..1e-3 = realistic grey 1/v "
+                             "counters (output name gets -b10d<density>)")
     parser.add_argument("--tag", default="",
                         help="extra output-name suffix (e.g. -bench10M to avoid clobbering "
                              "the default-name 1M run with a larger-budget run)")
@@ -87,10 +91,11 @@ if __name__ == "__main__":
         f"greens-function-k{args.label}"
         + ("-fundsrc" if args.source == "fundamental" else "")
         + (f"-gap{args.gap:g}" if args.gap != 10.0 else "")
+        + (f"-b10d{args.b10:.0e}" if args.b10 != BLACK_B10_DENSITY else "")
         + args.tag
     )
     simulation = Simulation(
-        materials=openmc.Materials([mixture_material, detector_material]),
+        materials=openmc.Materials([mixture_material, detector_material_b10(args.b10)]),
         geometry=geometry,
         settings=settings,
         name=name,
