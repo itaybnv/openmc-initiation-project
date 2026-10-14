@@ -32,7 +32,7 @@ def to_outline_ascii(s: str) -> str:
 
 
 ISOTOPE = re.compile(r"\b[A-Z][a-z]?-\d{1,3}\b")   # U-235, B-10, He-3: names, not numbers
-NUM = re.compile(r"(?:\+/-\s?)?[-+]?\d[\d ]*(?:\.\d+)?(?:e-?\d+)?(?:\s?%)?")
+NUM = re.compile(r"(?:\+/-\s?)?[-+]?(?:\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?(?:e-?\d+)?(?:\s?%)?")
 
 misses, not_in_appendix, n_tokens = [], [], 0
 texts = [("title", deck["title"]["title"]), ("title", deck["title"].get("name_line", ""))]

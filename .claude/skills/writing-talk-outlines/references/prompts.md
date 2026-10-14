@@ -20,14 +20,18 @@ Read, in this order:
 5. Every source listed in brief.md.
 
 Then write <folder>/outline.md. Rules that are not negotiable:
-- Each slide heading is one full sentence stating the slide's claim. Read your headings in
-  order when you finish; they must tell the whole argument alone.
+- Each slide heading is one full sentence stating the slide's claim, under 120 characters,
+  carrying the softness word of any number in it. Read your headings in order when you
+  finish; they must tell the whole argument alone, and each must say exactly what its
+  source says, in the source's direction and quantity.
 - Every number on a slide has its error or its softness word, and a row in the Numbers
   appendix naming the file it came from.
 - Three or four on-slide facts per slide, under 170 characters each. Detail goes in the
   talk track.
 - Retractions and soft numbers are stated on the slide where they live.
 - No agenda, summary or thank-you slide. No adjectives in place of numbers. No em dashes.
+- One spelling per number across the outline. SOURCE MISSING placeholders go in the
+  appendix only; on the slide, pose the question in plain words.
 
 Write the file, then reply with: the ghost deck (headings in order), the list of SOURCE
 MISSING items, and nothing else.

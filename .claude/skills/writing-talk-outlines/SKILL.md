@@ -41,8 +41,15 @@ phrasing, sycophancy or half-remembered numbers.
 
 ## Rules the writer must keep
 
-- One claim per slide, stated as a full sentence in the slide heading. Topic labels are not
-  headlines.
+- One claim per slide, stated as a full sentence in the slide heading, under 120
+  characters. Topic labels are not headlines.
+- A headline that compares two numbers names the quantity and the direction exactly as the
+  source does ("the window-fit alphas are 10 % steeper than point kinetics", not "sit
+  below"). Compression that changes the claim is the commonest failure; read every
+  headline against its source before handing over.
+- When a headline carries a number, it also carries that number's softness word
+  ("predicted", "pending", "indicative"); the bullets alone are not enough.
+- One spelling per number across the outline (0.41 or 41 %, not both).
 - Every number on a slide carries its error or its softness and appears in the Numbers
   appendix with the file it came from. No number is re-derived while writing.
 - Retractions and soft results are said on the slide where the number lives, not in a
@@ -63,3 +70,5 @@ phrasing, sycophancy or half-remembered numbers.
 - Writing the talk track as a second copy of the bullets. It is what is said out loud,
   including the one sentence that explains why the number matters.
 - Letting the editor pass change a claim. If a headline reads better but says less, revert.
+- Leaving a SOURCE MISSING placeholder on a slide. It stays in the appendix; the slide
+  poses the question in plain words.

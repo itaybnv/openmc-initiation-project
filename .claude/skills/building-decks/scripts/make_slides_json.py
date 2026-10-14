@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 SLIDE_RE = re.compile(r"^## (Slide (\d+)|Backup (B\d+)) · (.+?)\s*$", re.M)
-FIELD_RE = re.compile(r"^(Point|On-slide|Visual|Table|Layout|Stage|Talk track|Likely question):\s*(.*)$")
+FIELD_RE = re.compile(r"^(Point|On-slide|Visual|Table source|Table|Layout|Stage|Talk track|Likely question):\s*(.*)$")
 
 
 def convert(s: str) -> str:

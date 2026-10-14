@@ -22,6 +22,7 @@ On-slide:
 - <...>
 Visual: <repo-relative path to an existing figure> | NEW: <what to draw, data source, panels>
 Table: <optional; header row, then rows, cells separated by " | ">
+Table source: <optional; one file the whole table is read from; then its cells need no appendix rows>
 Layout: <optional: A figure-right, D figure-left, B band-and-row, stacked, text>
 Talk track: <what is said, in sentences; includes the why; two to six sentences>
 Likely question: <the question> -> <the answer, one or two sentences; name a backup if one exists>
@@ -61,13 +62,16 @@ Talk track: ...
   not a longer copy of the bullets.
 - **Likely question.** One per main slide. If the answer needs a figure, that is a backup.
 - **Numbers appendix.** Every number that appears in a headline, bullet or table, with the
-  file it came from. The source is a repo-relative path; add the key, line or report
-  section when the file is long. If a number has no file, it does not go on a slide.
+  file it came from. The source cell starts with the repo-relative path, then a comma and
+  the key, line or report section when the file is long. A table read from one file cites
+  it once with `Table source:` instead. After a file's first full path in the appendix, its
+  bare name is enough. Rows for pending numbers start with "pending:". If a number has no
+  file, it does not go on a slide.
 
 ## Budgets
 
 - Main slides: one per two to four minutes of talk. Backups: one per likely question.
-- On-slide text per slide: under 600 characters in total.
+- Headline: under 120 characters (two lines at 24 pt). Bullets: under 600 characters in total.
 - Talk track per slide: 60 to 150 words.
 - Through-line: under 80 words.
 

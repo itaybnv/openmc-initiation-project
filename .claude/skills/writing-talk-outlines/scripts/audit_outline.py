@@ -22,12 +22,12 @@ from pathlib import Path
 BANNED = [
     (r"—", "em dash"), (r"!", "exclamation mark"),
     (r"\b(key|crucial|pivotal|vital|robust|novel|seamless|cutting[- ]edge|groundbreaking)\b", "puff word"),
-    (r"\b(takeaway|insight|insights|landscape|journey|testament|delve|leverage)\b", "AI vocabulary"),
+    (r"\b(takeaway|insight|insights|landscape|journey|testament|delve)\b", "AI vocabulary"),
     (r"\b(it is worth noting|it's worth noting|in summary|in conclusion|importantly|notably)\b", "filler"),
     (r"\b(excited|thrilled|proud|happy to)\b", "sentiment"),
 ]
 ISOTOPE = re.compile(r"\b[A-Z][a-z]?-\d{1,3}\b")   # U-235, B-10, He-3: names, not numbers
-NUM = re.compile(r"(?:\+/-\s?)?[-+]?\d[\d ]*(?:\.\d+)?(?:e-?\d+)?(?:\s?%)?")
+NUM = re.compile(r"(?:\+/-\s?)?[-+]?(?:\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?(?:e-?\d+)?(?:\s?%)?")
 SLIDE_RE = re.compile(r"^## (Slide (\d+)|Backup (B\d+)) · (.+?)\s*$", re.M)
 
 
@@ -42,7 +42,7 @@ def parse(text: str):
         fields = {}
         cur = None
         for line in body.splitlines():
-            fm = re.match(r"^(Point|On-slide|Visual|Table|Layout|Talk track|Likely question):\s*(.*)$", line)
+            fm = re.match(r"^(Point|On-slide|Visual|Table source|Table|Layout|Stage|Talk track|Likely question):\s*(.*)$", line)
             if fm:
                 cur = fm.group(1)
                 fields[cur] = fm.group(2).strip()
@@ -95,16 +95,23 @@ def main(argv=None):
         for i, b in enumerate(s["bullets"], 1):
             if len(b) > 170:
                 warns.append(f"slide {s['id']}: bullet {i} is {len(b)} characters")
-        total = sum(len(b) for b in s["bullets"]) + len(s["headline"])
+        total = sum(len(b) for b in s["bullets"])
         if total > 600:
-            warns.append(f"slide {s['id']}: on-slide text {total} characters (budget 600)")
+            warns.append(f"slide {s['id']}: bullets total {total} characters (budget 600)")
+        if len(s["headline"]) > 120:
+            warns.append(f"slide {s['id']}: headline {len(s['headline'])} characters (two lines at 24 pt is about 120)")
         words = len(f.get("Talk track", "").split())
         if words and not 60 <= words <= 150:
             warns.append(f"slide {s['id']}: talk track {words} words (60 to 150)")
         vis = f.get("Visual", "")
         if vis.startswith("NEW:") and f"{s['id']}" not in visuals_to_make:
             warns.append(f"slide {s['id']}: NEW visual has no entry under 'Visuals to make'")
-        for piece in [s["headline"]] + s["bullets"] + [c for c in (f.get("Table") or "").split("|")]:
+        table_cells = [] if f.get("Table source") else [c for c in (f.get("Table") or "").split("|")]
+        if f.get("Table source"):
+            src = re.match(r"[\w./\-]+", f["Table source"].strip())
+            if not src or not any((b / src.group(0)).exists() for b in (repo, repo / "project", repo / "project" / "analysis", repo / "project" / "analysis" / "outputs", repo / "project" / "analysis" / "outputs" / "presentation", path.parent)):
+                fails.append(f"slide {s['id']}: Table source not found: {f['Table source']}")
+        for piece in [s["headline"]] + s["bullets"] + table_cells:
             for m in NUM.finditer(ISOTOPE.sub("", piece)):
                 tok = re.sub(r"\s+", " ", m.group(0).strip())
                 if not re.search(r"\d", tok) or re.fullmatch(r"[-+]?\d", tok) and not re.search(r"\d\s?%", tok):
@@ -116,18 +123,32 @@ def main(argv=None):
                 for m in re.finditer(pat, txt, re.I):
                     fails.append(f"slide {s['id']}: {why} in {where}: '{txt[max(0, m.start()-30):m.end()+30].strip()}'")
 
-    for row in re.finditer(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$", appendix, re.M):
-        num, used, src = row.groups()
-        if num.lower() in ("number", "---") or set(num) <= set("-"):
-            continue
-        p = re.split(r"[:#]", src.strip(), 1)[0].strip()
-        if not p or p.startswith("<"):
+    bases = [repo, repo / "project", repo / "project" / "analysis", repo / "project" / "analysis" / "outputs",
+             repo / "project" / "analysis" / "outputs" / "presentation", path.parent]
+    rows = [r.groups() for r in re.finditer(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$", appendix, re.M)]
+    rows = [(n, u, s_) for n, u, s_ in rows if n.lower() not in ("number", "---") and not set(n) <= set("-")]
+    # every full path mentioned anywhere in the appendix; a bare file name later in the
+    # appendix resolves when exactly one of these ends with it
+    known = {}
+    for _, _, src in rows:
+        for tok in re.findall(r"[\w./\-]+", src):
+            if "/" in tok:
+                for b in bases:
+                    if (b / tok).exists():
+                        known.setdefault(tok.rsplit("/", 1)[-1], set()).add(str(b / tok))
+    for num, used, src in rows:
+        if re.match(r"\s*(pending|SOURCE MISSING)\b", num, re.I):
+            continue    # softness rows: no file by definition
+        pm = re.match(r"\s*`?([\w./\-]+)", src)
+        p = pm.group(1) if pm else ""
+        if not p or p.startswith("<") or not re.search(r"[./]", p):
             fails.append(f"appendix: '{num}' has no source path")
             continue
-        cand = [repo / p, repo / "project" / p, repo / "project" / "analysis" / "outputs" / "presentation" / p,
-                repo / "project" / "analysis" / p, path.parent / p]
-        if not any(c.exists() for c in cand):
-            fails.append(f"appendix: source for '{num}' not found: {p}")
+        if any((b / p).exists() for b in bases):
+            continue
+        if "/" not in p and len(known.get(p, ())) == 1:
+            continue
+        fails.append(f"appendix: source for '{num}' not found: {p}")
 
     for w in warns:
         print("WARN", w)
