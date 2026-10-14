@@ -23,6 +23,11 @@ __pycache__/
 
 CLAUDE.md
 
-# Editor / Claude Code local settings
+# Editor / Claude Code local settings (the two project skills ARE tracked)
 .vscode/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/writing-talk-outlines/
+!.claude/skills/building-decks/
+.claude/skills/building-decks/scripts/node_modules/

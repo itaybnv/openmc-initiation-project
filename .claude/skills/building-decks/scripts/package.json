@@ -1,0 +1,11 @@
+{
+  "name": "building-decks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "pptxgenjs builder for the project's talk decks (see ../SKILL.md)",
+  "dependencies": {
+    "image-size": "^1.1.1",
+    "jszip": "^3.10.1",
+    "pptxgenjs": "^4.0.1"
+  }
+}
