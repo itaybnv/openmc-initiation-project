@@ -26,7 +26,9 @@ def detector_material_b10(density: float = BLACK_B10_DENSITY) -> openmc.Material
     the grey-detector study (analysis/grey_detector_study.py) dials this down to move
     the benchmark into the paper's low-efficiency regime at fixed geometry.
     """
-    m = openmc.Material(name=f"Detector material (B10 {density:g} atom/b-cm)")
+    # explicit id: the geometry factories call openmc.reset_auto_ids(), so a material
+    # created afterwards would otherwise collide with mixture_material's id 1
+    m = openmc.Material(material_id=2, name=f"Detector material (B10 {density:g} atom/b-cm)")
     m.add_nuclide("B10", 1.0, "ao")
     m.set_density("atom/b-cm", float(density))
     return m
